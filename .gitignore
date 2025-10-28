@@ -1,6 +1,5 @@
-node_modules/
-venv/
 .env
-*.pyc
-__pycache__/
+node_modules/
 data/database.db
+data/database.db-shm
+data/database.db-wal
