@@ -1,0 +1,17 @@
+{
+  "name": "gamblergpt",
+  "version": "1.0.0",
+  "description": "Football analytics and Telegram bot rewritten in Node.js",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "node main.js",
+    "bot": "node bot/bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "better-sqlite3": "^9.0.0",
+    "dotenv": "^16.4.0",
+    "telegraf": "^4.16.0"
+  }
+}
