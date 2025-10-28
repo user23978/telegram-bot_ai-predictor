@@ -83,27 +83,35 @@ export async function predictMatch(matchId) {
   const prompt = buildPrompt(match, features, context);
 
   if (LLAMA_SERVER_URL) {
-    const remoteRaw = await callRemoteLlama(prompt);
-    const parsed = normalizeIncomingPayload(remoteRaw);
-    if (parsed) {
-      const validated = normalizePrediction(parsed, match.match_id);
-      if (validated) {
-        const source = typeof parsed.engine === 'string' ? parsed.engine : 'llama';
-        return { ...validated, engine: source };
+    try {
+      const remoteRaw = await callRemoteLlama(prompt);
+      const parsed = normalizeIncomingPayload(remoteRaw);
+      if (parsed) {
+        const validated = normalizePrediction(parsed, match.match_id);
+        if (validated) {
+          const source = typeof parsed.engine === 'string' ? parsed.engine : 'llama';
+          return { ...validated, engine: source };
+        }
+        console.warn('Remote Llama lieferte ein ungueltiges Format, wechsle zum naechsten Fallback.');
       }
-      console.warn('Remote Llama lieferte ein ungueltiges Format, wechsle zum naechsten Fallback.');
+    } catch (error) {
+      console.warn('Remote Llama Anfrage fehlgeschlagen, nutze Fallback:', error?.message ?? error);
     }
   }
 
   if (OLLAMA_MODEL) {
-    const ollamaRaw = await callOllama(prompt);
-    const parsed = normalizeIncomingPayload(ollamaRaw);
-    if (parsed) {
-      const validated = normalizePrediction(parsed, match.match_id);
-      if (validated) {
-        return { ...validated, engine: 'ollama' };
+    try {
+      const ollamaRaw = await callOllama(prompt);
+      const parsed = normalizeIncomingPayload(ollamaRaw);
+      if (parsed) {
+        const validated = normalizePrediction(parsed, match.match_id);
+        if (validated) {
+          return { ...validated, engine: 'ollama' };
+        }
+        console.warn('Ollama lieferte ein ungueltiges Format, nutze das Regel-basierte Modell.');
       }
-      console.warn('Ollama lieferte ein ungueltiges Format, nutze das Regel-basierte Modell.');
+    } catch (error) {
+      console.warn('Ollama-Anfrage fehlgeschlagen, nutze Fallback:', error?.message ?? error);
     }
   }
 

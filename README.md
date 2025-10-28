@@ -47,6 +47,10 @@ GamblerGPT ist eine Node.js‑Anwendung, die Fußball‑ und Basketballspiele an
 
    Nur `API_FOOTBALL_KEY` und `TELEGRAM_BOT_TOKEN` sind erforderlich. Die übrigen Variablen konfigurieren optionale Features wie das lokale LLM oder eine benutzerdefinierte Zeitzone.
 
+### Back4App Deployment
+
+Back4App führt regelmäßige HTTP-Health-Checks durch. Damit der Check erfolgreich ist, stellt `server.js` einen schlanken HTTP-Server bereit und startet parallel den Telegram-Bot. Verwende für Deployments auf Back4App den Befehl `npm start`, damit der Health-Check auf Port `8080` beantwortet wird, während der Bot im Hintergrund weiterläuft. Stelle sicher, dass die notwendigen Umgebungsvariablen (`API_FOOTBALL_KEY`, `TELEGRAM_BOT_TOKEN` sowie optional weitere) im Back4App-Dashboard hinterlegt sind.
+
 ## Verwendung
 
 ### CLI‑Pipeline
