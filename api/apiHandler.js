@@ -58,8 +58,7 @@ export function loadMatchesFromDb(mode, limit = 20, range, sport = 'football') {
 
   const statuses = UPCOMING_STATUS_CODES[currentSport] ?? UPCOMING_STATUS_CODES.football;
   const now = new Date();
-  const nowIso = now.toISOString();
-  const today = nowIso.slice(0, 10);
+  const today = now.toISOString().slice(0, 10);
   const placeholders = statuses
     .map((_, index) => `@status${index}`)
     .join(', ');
@@ -82,13 +81,13 @@ export function loadMatchesFromDb(mode, limit = 20, range, sport = 'football') {
     FROM matches
     WHERE sport = @sport
       AND (
-        status IN (${placeholders}) OR
-        (date IS NOT NULL AND datetime(date) >= datetime(@nowIso))
+        (date IS NOT NULL AND date(date) > date(@today)) OR
+        (date IS NULL AND status IN (${placeholders}))
       )
-    ORDER BY datetime(date) ASC
+    ORDER BY datetime(COALESCE(date, CURRENT_TIMESTAMP)) ASC
     LIMIT @limit
   `);
-  const params = { sport: currentSport, limit, nowIso };
+  const params = { sport: currentSport, limit, today };
   statuses.forEach((value, index) => {
     params[`status${index}`] = value;
   });
@@ -134,6 +133,15 @@ async function fetchFootballMatches({ mode, limit, range }) {
     const payload = response.data ?? {};
     let matches = Array.isArray(payload.response) ? payload.response : [];
 
+    if (mode === 'upcoming' && range !== 'today') {
+      const today = formatDateOffset(0);
+      matches = matches.filter((match) => {
+        const iso = extractIsoDateFootball(match?.fixture, match);
+        if (!iso) return true;
+        return iso.slice(0, 10) > today;
+      });
+    }
+
     if (!matches.length && mode === 'upcoming') {
       matches = await fetchFootballUpcomingFallback(apiKey, limit, range);
     }
@@ -153,29 +161,119 @@ async function fetchBasketballMatches({ mode, limit, range }) {
     throw new Error('API_BASKETBALL_KEY not set in environment (.env)');
   }
 
-  const url = buildBasketballEndpoint(mode, limit, range);
-  try {
-    const response = await axios.get(url, {
-      headers: {
-        'x-apisports-key': apiKey,
-        'x-rapidapi-host': 'v1.basketball.api-sports.io'
-      },
-      timeout: 15000
-    });
+  const leagues = parseBasketballLeagues();
+  const leagueList = leagues.length ? leagues : [null];
+  const pageSize = Math.max(Number(limit) || 10, 10);
+  const targetSize = Math.max(pageSize + 5, 20);
+  const collected = new Map();
 
-    if (response.status !== 200) {
-      throw new Error(`Fehler beim Abrufen der Daten: HTTP ${response.status}`);
+  const addMatches = (matches, { allowOverflow = true } = {}) => {
+    for (const match of matches) {
+      const rawId = match?.id ?? match?.game_id ?? match?.match_id;
+      const composedId = composeMatchId(rawId, 'basketball');
+      if (!composedId || collected.has(composedId)) continue;
+      collected.set(composedId, match);
+      if (allowOverflow && collected.size >= targetSize) break;
+    }
+  };
+
+  const fetchGames = async (params, label, options) => {
+    try {
+      const { matches, planMessage } = await requestBasketballGames(params, apiKey, label);
+      if (planMessage) {
+        console.warn(`Basketball API Hinweis (${label}): ${planMessage}`);
+      }
+      addMatches(matches, options);
+      return matches.length > 0;
+    } catch (error) {
+      const message = error?.message ?? String(error);
+      console.error(`API Abruf fehlgeschlagen (${label}):`, message);
+      return false;
+    }
+  };
+
+  if (mode === 'live') {
+    for (const league of leagueList) {
+      const params = new URLSearchParams({
+        timezone: DEFAULT_TIMEZONE,
+        live: 'all'
+      });
+      if (league !== null) params.set('league', String(league));
+
+      await fetchGames(params, `basketball/live${league ? `/league-${league}` : ''}`);
+      if (collected.size >= targetSize) break;
     }
 
-    const payload = response.data ?? {};
-    const matches = Array.isArray(payload.response) ? payload.response : [];
-    saveMatches(matches, 'basketball');
-    return matches;
-  } catch (error) {
-    const message = error?.message ?? String(error);
-    console.error(`API Abruf fehlgeschlagen (basketball/${mode}):`, message);
+    if (!collected.size) {
+      await fetchGames(
+        new URLSearchParams({ timezone: DEFAULT_TIMEZONE, live: 'all' }),
+        'basketball/live/fallback'
+      );
+    }
+  } else {
+    const dayOffsets = range === 'today' ? [0] : [1, 2, 3, 4, 5, 6];
+
+    outer: for (const offset of dayOffsets) {
+      const date = formatDateOffset(offset);
+      for (const league of leagueList) {
+        const params = new URLSearchParams({
+          timezone: DEFAULT_TIMEZONE,
+          date
+        });
+        if (league !== null) params.set('league', String(league));
+
+        await fetchGames(params, `basketball/date-${date}${league ? `/league-${league}` : ''}`);
+        if (collected.size >= targetSize) break outer;
+      }
+    }
+
+    if (!collected.size) {
+      const fallbackDates =
+        range === 'today'
+          ? ['2025-10-27', '2025-10-28', '2025-10-29']
+          : ['2025-10-28', '2025-10-29'];
+      for (const date of fallbackDates) {
+        const params = new URLSearchParams({
+          timezone: DEFAULT_TIMEZONE,
+          date
+        });
+        await fetchGames(
+          params,
+          `basketball/sample-${date}`,
+          { allowOverflow: false }
+        );
+      }
+    }
+  }
+
+  if (!collected.size) {
     return [];
   }
+
+  const ordered = [...collected.values()].sort((a, b) => {
+    const isoA = extractIsoDateBasketball(a);
+    const isoB = extractIsoDateBasketball(b);
+    const timeA = isoA ? Date.parse(isoA) : Number.POSITIVE_INFINITY;
+    const timeB = isoB ? Date.parse(isoB) : Number.POSITIVE_INFINITY;
+    return timeA - timeB;
+  });
+
+  let filtered = ordered;
+  if (mode === 'upcoming' && range !== 'today') {
+    const today = formatDateOffset(0);
+    filtered = ordered.filter((match) => {
+      const iso = extractIsoDateBasketball(match);
+      if (!iso) return true;
+      return iso.slice(0, 10) > today;
+    });
+  }
+
+  let limited = filtered.slice(0, pageSize);
+  if (!limited.length && ordered.length) {
+    limited = ordered.slice(0, pageSize);
+  }
+  saveMatches(limited, 'basketball');
+  return limited;
 }
 
 async function fetchFootballTeamHistory(teamId, last) {
@@ -217,36 +315,35 @@ async function fetchBasketballTeamHistory(teamId, last) {
     throw new Error('API_BASKETBALL_KEY not set in environment (.env)');
   }
 
-  const params = new URLSearchParams({
+  const baseParams = {
     team: String(teamId),
     last: String(last),
     timezone: DEFAULT_TIMEZONE
-  });
+  };
 
   const season = resolveBasketballSeason();
-  if (season) {
-    params.set('season', season);
+  const params = new URLSearchParams(baseParams);
+  if (season) params.set('season', season);
+
+  let { matches, planMessage } = await requestBasketballGames(
+    params,
+    apiKey,
+    `basketball/team-${teamId}`
+  );
+
+  if (!matches.length && planMessage && season) {
+    const retryParams = new URLSearchParams(baseParams);
+    ({ matches } = await requestBasketballGames(
+      retryParams,
+      apiKey,
+      `basketball/team-${teamId}-fallback`
+    ));
   }
 
-  try {
-    const response = await axios.get(`${BASKETBALL_BASE_URL}?${params.toString()}`, {
-      headers: { 'x-apisports-key': apiKey },
-      timeout: 15000
-    });
-
-    if (response.status !== 200) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const payload = response.data ?? {};
-    const matches = Array.isArray(payload.response) ? payload.response : [];
+  if (matches.length) {
     saveMatches(matches, 'basketball');
-    return matches;
-  } catch (error) {
-    const message = error?.message ?? String(error);
-    console.warn(`Historie fuer Basketball-Team ${teamId} fehlgeschlagen:`, message);
-    return [];
   }
+  return matches;
 }
 
 async function fetchFootballHeadToHead(teamAId, teamBId, last) {
@@ -291,39 +388,35 @@ async function fetchBasketballHeadToHead(teamAId, teamBId, last) {
     throw new Error('API_BASKETBALL_KEY not set in environment (.env)');
   }
 
-  const params = new URLSearchParams({
+  const baseParams = {
     h2h: `${teamAId}-${teamBId}`,
     last: String(last),
     timezone: DEFAULT_TIMEZONE
-  });
+  };
 
   const season = resolveBasketballSeason();
-  if (season) {
-    params.set('season', season);
+  const params = new URLSearchParams(baseParams);
+  if (season) params.set('season', season);
+
+  let { matches, planMessage } = await requestBasketballGames(
+    params,
+    apiKey,
+    `basketball/h2h-${teamAId}-${teamBId}`
+  );
+
+  if (!matches.length && planMessage && season) {
+    const retryParams = new URLSearchParams(baseParams);
+    ({ matches } = await requestBasketballGames(
+      retryParams,
+      apiKey,
+      `basketball/h2h-${teamAId}-${teamBId}-fallback`
+    ));
   }
 
-  try {
-    const response = await axios.get(`${BASKETBALL_BASE_URL}?${params.toString()}`, {
-      headers: {
-        'x-apisports-key': apiKey,
-        'x-rapidapi-host': 'v1.basketball.api-sports.io'
-      },
-      timeout: 15000
-    });
-
-    if (response.status !== 200) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-
-    const payload = response.data ?? {};
-    const matches = Array.isArray(payload.response) ? payload.response : [];
+  if (matches.length) {
     saveMatches(matches, 'basketball');
-    return matches;
-  } catch (error) {
-    const message = error?.message ?? String(error);
-    console.warn(`Head-to-head Basketball ${teamAId} vs ${teamBId} fehlgeschlagen:`, message);
-    return [];
   }
+  return matches;
 }
 
 function buildFootballEndpoint(mode, limit, range) {
@@ -348,29 +441,6 @@ function buildFootballEndpoint(mode, limit, range) {
   }
 
   return `${FOOTBALL_BASE_URL}?${params.toString()}`;
-}
-
-function buildBasketballEndpoint(mode, limit, range) {
-  const params = new URLSearchParams({
-    timezone: DEFAULT_TIMEZONE
-  });
-
-  const season = resolveBasketballSeason();
-  if (season) {
-    params.set('season', season);
-  }
-
-  if (mode === 'upcoming') {
-    if (range === 'today') {
-      params.set('date', formatDateOffset(0));
-    } else {
-      params.set('next', String(limit));
-    }
-  } else if (mode === 'live') {
-    params.set('live', 'all');
-  }
-
-  return `${BASKETBALL_BASE_URL}?${params.toString()}`;
 }
 
 async function fetchFootballUpcomingFallback(apiKey, limit, range) {
@@ -398,7 +468,9 @@ async function fetchFootballUpcomingFallback(apiKey, limit, range) {
 
   const daysToCheck = Math.min(Math.max(limit, 1), 7);
 
-  for (let offset = 0; offset < daysToCheck && results.length < limit; offset += 1) {
+  const startOffset = range === 'today' ? 0 : 1;
+
+  for (let offset = startOffset; offset < daysToCheck + startOffset && results.length < limit; offset += 1) {
     const date = formatDateOffset(offset);
     const params = new URLSearchParams({
       timezone: DEFAULT_TIMEZONE,
@@ -425,6 +497,29 @@ async function fetchFootballUpcomingFallback(apiKey, limit, range) {
   }
 
   return results;
+}
+
+async function requestBasketballGames(params, apiKey, label) {
+  const query = params.toString();
+  const response = await axios.get(`${BASKETBALL_BASE_URL}?${query}`, {
+    headers: {
+      'x-apisports-key': apiKey,
+      'x-rapidapi-host': 'v1.basketball.api-sports.io'
+    },
+    timeout: 15000
+  });
+
+  if (response.status !== 200) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const payload = response.data ?? {};
+  const rawErrors = payload.errors ?? null;
+  const planMessage =
+    rawErrors && typeof rawErrors === 'object' && 'plan' in rawErrors ? rawErrors.plan : null;
+  const matches = Array.isArray(payload.response) ? payload.response : [];
+
+  return { matches, planMessage };
 }
 
 function saveMatches(matches, sport) {
@@ -552,6 +647,29 @@ function resolveBasketballSeason() {
     return `${year}-${year + 1}`;
   }
   return `${year - 1}-${year}`;
+}
+
+function parseBasketballLeagues() {
+  const raw =
+    process.env.API_BASKETBALL_LEAGUES ??
+    process.env.API_BASKETBALL_LEAGUE ??
+    '';
+
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    // Default to a diverse set of popular leagues to maximise coverage on free plans.
+    return [12, 63, 91, 225];
+  }
+
+  if (trimmed === '*') {
+    return [];
+  }
+
+  return trimmed
+    .split(',')
+    .map((part) => Number(part.trim()))
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .filter((value, index, array) => array.indexOf(value) === index);
 }
 
 function formatDateOffset(offsetDays) {

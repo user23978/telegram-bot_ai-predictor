@@ -145,17 +145,17 @@ async function showMatchesForMode(ctx, sport, mode, page = 1) {
   const icon = sport === 'basketball' ? EMOJI_BASKETBALL : EMOJI_SOCCER;
   const label = mode === 'live' ? `${sportName}-Live-Spiele` : `${sportName}-Spiele`;
   try {
-    const limit = 10;
-    const sliceEnd = page * limit;
-    const sliceStart = sliceEnd - limit;
+    const pageSize = 10;
+    const sliceStart = (page - 1) * pageSize;
+    const fetchLimit = sliceStart + pageSize + 1;
 
-    const apiMatches = await fetchMatches({ sport, mode, limit: sliceEnd });
+    const apiMatches = await fetchMatches({ sport, mode, limit: fetchLimit });
     let matches = apiMatches;
     if (!matches.length) {
-      matches = loadMatchesFromDb(mode, sliceEnd, undefined, sport);
+      matches = loadMatchesFromDb(mode, fetchLimit, undefined, sport);
     }
 
-    const pageItems = matches.slice(sliceStart, sliceEnd);
+    const pageItems = matches.slice(sliceStart, sliceStart + pageSize);
     if (!pageItems.length) {
       await ctx.editMessageText(
         `${label}: Keine Spiele gefunden.`,
@@ -165,7 +165,7 @@ async function showMatchesForMode(ctx, sport, mode, page = 1) {
     }
 
     const hasPrev = page > 1;
-    const hasMore = matches.length > sliceEnd;
+    const hasMore = matches.length > sliceStart + pageSize;
 
     const rows = pageItems
       .map((match) => {
@@ -209,17 +209,22 @@ async function showUpcomingByRange(ctx, sport, range, page = 1) {
   const label = range === 'today' ? 'Heute' : 'Demnächst';
   const sportIcon = sport === 'basketball' ? EMOJI_BASKETBALL : EMOJI_SOCCER;
   try {
-    const limit = 10;
-    const sliceEnd = page * limit;
-    const sliceStart = sliceEnd - limit;
+    const pageSize = 10;
+    const sliceStart = (page - 1) * pageSize;
+    const fetchLimit = sliceStart + pageSize + 1;
 
-    const apiMatches = await fetchMatches({ sport, mode: 'upcoming', limit: sliceEnd, range });
+    const apiMatches = await fetchMatches({
+      sport,
+      mode: 'upcoming',
+      limit: fetchLimit,
+      range
+    });
     let matches = apiMatches;
     if (!matches.length) {
-      matches = loadMatchesFromDb('upcoming', sliceEnd, range, sport);
+      matches = loadMatchesFromDb('upcoming', fetchLimit, range, sport);
     }
 
-    const pageItems = matches.slice(sliceStart, sliceEnd);
+    const pageItems = matches.slice(sliceStart, sliceStart + pageSize);
     if (!pageItems.length) {
       await ctx.editMessageText(
         `${label}: Keine Spiele gefunden.`,
@@ -229,7 +234,7 @@ async function showUpcomingByRange(ctx, sport, range, page = 1) {
     }
 
     const hasPrev = page > 1;
-    const hasMore = matches.length > sliceEnd;
+    const hasMore = matches.length > sliceStart + pageSize;
 
     const rows = pageItems
       .map((match) => {
@@ -336,14 +341,24 @@ async function sendMessage(ctx, mode, message, options = {}) {
 }
 
 function getMatchDetails(matchId) {
+  const numericId = toNumber(matchId);
+  if (numericId === null) return null;
+
   const db = getDb();
-  return db
-    .prepare(
-      `SELECT match_id, COALESCE(sport, 'football') AS sport, date, status, home_team, away_team, home_goals, away_goals
-       FROM matches
-       WHERE match_id = ?`
-    )
-    .get(matchId);
+  const stmt = db.prepare(
+    `SELECT match_id, COALESCE(sport, 'football') AS sport, date, status, home_team, away_team, home_goals, away_goals
+     FROM matches
+     WHERE match_id = ?`
+  );
+
+  for (const candidate of makeCandidateMatchIds(numericId)) {
+    const row = stmt.get(candidate);
+    if (row) {
+      return row;
+    }
+  }
+
+  return null;
 }
 
 function formatBettingMessage(result, match) {
@@ -477,6 +492,20 @@ function describeSport(sport) {
   return sport === 'basketball' ? 'Basketball' : 'Fussball';
 }
 
+function makeCandidateMatchIds(matchId) {
+  const numeric = toNumber(matchId);
+  if (numeric === null) return [];
+  const candidates = new Set([numeric]);
+  for (const offset of Object.values(MATCH_ID_OFFSETS)) {
+    if (!Number.isFinite(offset) || offset === 0) continue;
+    candidates.add(numeric + offset);
+    if (numeric >= offset) {
+      candidates.add(numeric - offset);
+    }
+  }
+  return [...candidates].filter((value) => Number.isFinite(value) && value >= 0);
+}
+
 function resolveMatchId(match, sportHint = 'football') {
   if (!match) return null;
   if (match?.match_id !== undefined && match?.match_id !== null) {
@@ -516,6 +545,12 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function toNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 export async function startBot() {

@@ -15,6 +15,11 @@ const H2H_HISTORY_SIZE = 10;
 
 const fetchedHistoryTeams = new Set();
 
+const SPORT_OFFSETS = {
+  football: 0,
+  basketball: 5_000_000_000
+};
+
 const SPORT_PROMPT_META = {
   football: {
     analystLabel: 'Fussball-Analyst',
@@ -58,7 +63,12 @@ export function getFeatures(matchId, sportHint = 'football') {
 }
 
 export async function predictMatch(matchId) {
-  const match = getMatchRecord(matchId);
+  const numericId = toNumber(matchId);
+  if (numericId === null) {
+    return { error: 'Ungueltige Match-ID' };
+  }
+
+  const match = getMatchRecord(numericId);
   if (!match) {
     return { error: 'Match nicht gefunden' };
   }
@@ -101,7 +111,13 @@ export async function predictMatch(matchId) {
 }
 
 export async function ensureMatchHistory(matchId) {
-  const match = typeof matchId === 'object' ? matchId : getMatchRecord(matchId);
+  const numericId = typeof matchId === 'object' ? null : toNumber(matchId);
+  const match =
+    typeof matchId === 'object'
+      ? matchId
+      : numericId === null
+        ? null
+        : getMatchRecord(numericId);
   if (!match) return;
   await hydrateMatchHistory(match);
 }
@@ -281,21 +297,28 @@ function parseJsonSafe(value) {
 
 function getMatchRecord(matchId) {
   const db = getDb();
-  return db
-    .prepare(
-      `SELECT
-         match_id,
-         COALESCE(sport, 'football') AS sport,
-         date,
-         status,
-         home_team,
-         away_team,
-         home_team_id,
-         away_team_id
-       FROM matches
-       WHERE match_id = ?`
-    )
-    .get(matchId);
+  const stmt = db.prepare(
+    `SELECT
+       match_id,
+       COALESCE(sport, 'football') AS sport,
+       date,
+       status,
+       home_team,
+       away_team,
+       home_team_id,
+       away_team_id
+     FROM matches
+     WHERE match_id = ?`
+  );
+
+  for (const candidate of makeCandidateMatchIds(matchId)) {
+    const row = stmt.get(candidate);
+    if (row) {
+      return row;
+    }
+  }
+
+  return null;
 }
 
 async function hydrateMatchHistory(match) {
@@ -675,6 +698,23 @@ function simpleRulePredict(match, features) {
 
 function buildHistoryKey(sport, teamId) {
   return `${sport}:${teamId}`;
+}
+
+function makeCandidateMatchIds(matchId) {
+  const baseId = toNumber(matchId);
+  if (baseId === null) return [];
+
+  const candidates = new Set([baseId]);
+
+  for (const offset of Object.values(SPORT_OFFSETS)) {
+    if (!Number.isFinite(offset) || offset === 0) continue;
+    candidates.add(baseId + offset);
+    if (baseId >= offset) {
+      candidates.add(baseId - offset);
+    }
+  }
+
+  return [...candidates].filter((value) => Number.isFinite(value) && value >= 0);
 }
 
 function randomSpread(scale = 0.1) {
