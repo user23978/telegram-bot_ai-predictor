@@ -32,6 +32,11 @@ export function setupDatabase() {
   ensureColumn(db, 'matches', 'home_team_id', 'INTEGER');
   ensureColumn(db, 'matches', 'away_team_id', 'INTEGER');
   ensureColumn(db, 'matches', 'sport', 'TEXT');
+  ensureColumn(db, 'matches', 'league_id', 'INTEGER');
+  ensureColumn(db, 'matches', 'league_name', 'TEXT');
+  ensureColumn(db, 'matches', 'league_country', 'TEXT');
+  ensureColumn(db, 'matches', 'season', 'INTEGER');
+  ensureColumn(db, 'matches', 'round', 'TEXT');
 
   ensureColumn(db, 'stats', 'sport', 'TEXT');
   ensureColumn(db, 'stats', 'home_games', 'INTEGER DEFAULT 0');
