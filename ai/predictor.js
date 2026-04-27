@@ -3,13 +3,14 @@ import dotenv from 'dotenv';
 
 import { getDb } from '../data/db.js';
 import { fetchTeamHistory, fetchHeadToHeadHistory, fetchMatchById } from '../api/apiHandler.js';
+import { buildFootballContext, formatFootballContextForPrompt, getFootballContextDebug } from '../api/footballContext.js';
 import { calculateFeatures } from '../features/featureEngine.js';
 
 dotenv.config();
 
 const LLAMA_SERVER_URL = process.env.LLAMA_SERVER_URL ?? null;
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? null;
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'qwen3:8b';
 
 const TEAM_HISTORY_SIZE = 12;
 const H2H_HISTORY_SIZE = 10;
@@ -69,6 +70,78 @@ export function getFeatures(matchId, sportHint = 'football') {
 }
 
 export async function predictMatch(matchId) {
+  const prepared = await preparePredictionInput(matchId);
+  if (prepared.error) return { error: prepared.error };
+
+  const { match, features, context, externalContext } = prepared;
+  const prompt = buildPrompt(match, features, context, externalContext);
+
+  if (LLAMA_SERVER_URL) {
+    try {
+      const remoteRaw = await callRemoteLlama(prompt);
+      const parsed = normalizeIncomingPayload(remoteRaw);
+      if (parsed) {
+        const validated = normalizePrediction(parsed, match.match_id, match.sport);
+        if (validated) return addMeta(validated, 'llama', prepared);
+        console.warn('Remote Llama lieferte ein ungueltiges Format, wechsle zum naechsten Fallback.');
+      }
+    } catch (error) {
+      console.warn('Remote Llama Anfrage fehlgeschlagen, nutze Fallback:', error?.message ?? error);
+    }
+  }
+
+  if (OLLAMA_MODEL) {
+    try {
+      const ollamaRaw = await callOllama(prompt);
+      const parsed = normalizeIncomingPayload(ollamaRaw);
+      if (parsed) {
+        const validated = normalizePrediction(parsed, match.match_id, match.sport);
+        if (validated) return addMeta(validated, `ollama:${OLLAMA_MODEL}`, prepared);
+        console.warn('Ollama lieferte ein ungueltiges Format, nutze das regelbasierte Modell.');
+      }
+    } catch (error) {
+      console.warn('Ollama-Anfrage fehlgeschlagen, nutze Fallback:', error?.message ?? error);
+    }
+  }
+
+  return addMeta(simpleRulePredict(match, features, context, externalContext), 'rule-based', prepared);
+}
+
+export async function ensureMatchHistory(matchId) {
+  const numericId = typeof matchId === 'object' ? null : toNumber(matchId);
+  const match = typeof matchId === 'object' ? matchId : numericId === null ? null : getMatchRecord(numericId);
+  if (!match) return;
+  await hydrateMatchHistory(match);
+}
+
+export async function getPredictionDebug(matchId) {
+  const prepared = await preparePredictionInput(matchId);
+  if (prepared.error) return { error: prepared.error };
+  const { match, features, context, externalContext } = prepared;
+  return {
+    match,
+    features,
+    localData: {
+      homeRecentCount: context.homeTeamRecent.length,
+      awayRecentCount: context.awayTeamRecent.length,
+      h2hCount: context.headToHead.length,
+      homeRecent: context.homeTeamRecent.slice(0, 5),
+      awayRecent: context.awayTeamRecent.slice(0, 5),
+      h2h: context.headToHead.slice(0, 5)
+    },
+    external: getFootballContextDebug(externalContext),
+    ollama: {
+      host: OLLAMA_HOST,
+      model: OLLAMA_MODEL,
+      enabled: Boolean(OLLAMA_MODEL)
+    },
+    llama: {
+      enabled: Boolean(LLAMA_SERVER_URL)
+    }
+  };
+}
+
+async function preparePredictionInput(matchId) {
   const numericId = toNumber(matchId);
   if (numericId === null) return { error: 'Ungueltige Match-ID' };
 
@@ -84,61 +157,30 @@ export async function predictMatch(matchId) {
 
   const features = getFeatures(match.match_id, match.sport) ?? createEmptyFeatures(match.sport);
   const context = getMatchContext(match);
-  const prompt = buildPrompt(match, features, context);
+  const externalContext = match.sport === 'football'
+    ? await buildFootballContext(match)
+    : { available: false, reason: 'Nur Fussball-Context implementiert', quality: { score: 0, label: 'schwach', reason: 'kein Fussball' } };
 
-  if (LLAMA_SERVER_URL) {
-    try {
-      const remoteRaw = await callRemoteLlama(prompt);
-      const parsed = normalizeIncomingPayload(remoteRaw);
-      if (parsed) {
-        const validated = normalizePrediction(parsed, match.match_id, match.sport);
-        if (validated) return { ...validated, engine: typeof parsed.engine === 'string' ? parsed.engine : 'llama' };
-        console.warn('Remote Llama lieferte ein ungueltiges Format, wechsle zum naechsten Fallback.');
-      }
-    } catch (error) {
-      console.warn('Remote Llama Anfrage fehlgeschlagen, nutze Fallback:', error?.message ?? error);
-    }
-  }
-
-  if (OLLAMA_MODEL) {
-    try {
-      const ollamaRaw = await callOllama(prompt);
-      const parsed = normalizeIncomingPayload(ollamaRaw);
-      if (parsed) {
-        const validated = normalizePrediction(parsed, match.match_id, match.sport);
-        if (validated) return { ...validated, engine: 'ollama' };
-        console.warn('Ollama lieferte ein ungueltiges Format, nutze das Regel-basierte Modell.');
-      }
-    } catch (error) {
-      console.warn('Ollama-Anfrage fehlgeschlagen, nutze Fallback:', error?.message ?? error);
-    }
-  }
-
-  return simpleRulePredict(match, features, context);
+  return { match, features, context, externalContext };
 }
 
-export async function ensureMatchHistory(matchId) {
-  const numericId = typeof matchId === 'object' ? null : toNumber(matchId);
-  const match = typeof matchId === 'object' ? matchId : numericId === null ? null : getMatchRecord(numericId);
-  if (!match) return;
-  await hydrateMatchHistory(match);
-}
-
-function buildPrompt(match, features, context) {
+function buildPrompt(match, features, context, externalContext) {
   const sport = match.sport ?? 'football';
   const meta = SPORT_PROMPT_META[sport] ?? SPORT_PROMPT_META.football;
 
   const homeHistory = formatTeamHistory(context.homeTeamRecent, context.homeTeam, `Letzte Spiele ${context.homeTeam ?? 'Heimteam'}`, sport);
   const awayHistory = formatTeamHistory(context.awayTeamRecent, context.awayTeam, `Letzte Spiele ${context.awayTeam ?? 'Auswaertsteam'}`, sport);
   const h2hHistory = formatHeadToHeadHistory(context.headToHead, `Direkte Duelle (${context.homeTeam ?? 'Heimteam'} vs ${context.awayTeam ?? 'Auswaertsteam'})`, sport);
+  const externalBlock = formatFootballContextForPrompt(externalContext, context.homeTeam, context.awayTeam);
 
   return [
-    `Du bist ein vorsichtiger ${meta.analystLabel}.`,
-    'Nutze nur die unten gegebenen Daten. Erfinde keine Quoten, Verletzungen, Tabellenplaetze oder News.',
-    'Wenn die Datenlage schwach ist, senke die confidence und erklaere das klar.',
+    `Du bist ein vorsichtiger, datengetriebener ${meta.analystLabel}.`,
+    'Nutze nur die unten gegebenen Daten. Erfinde keine News, Verletzungen, Quoten, Tabellenplaetze oder Formwerte.',
+    'Wenn die Datenlage schwach oder widerspruechlich ist, senke die confidence und schreibe das klar in reasoning.',
+    'Gib keine starke Wettempfehlung aus, wenn Sample Size, Odds-Markt, API-Prediction oder Teamdaten keinen klaren Edge zeigen.',
     'Antworte ausschliesslich mit einem JSON-Objekt mit diesen Feldern:',
     'match_id, prediction, probabilities {home, draw, away}, explanation, betting_advice {recommendation, confidence, reasoning}.',
-    'probabilities und confidence sollen Werte zwischen 0 und 1 sein.',
+    'probabilities und confidence muessen Werte zwischen 0 und 1 sein.',
     '',
     `Match ID: ${match.match_id}`,
     `Sportart: ${sport}`,
@@ -147,11 +189,13 @@ function buildPrompt(match, features, context) {
     `Heimteam: ${context.homeTeam ?? 'Unbekannt'}`,
     `Auswaertsteam: ${context.awayTeam ?? 'Unbekannt'}`,
     '',
-    'Berechnete Stats:',
+    'Berechnete lokale Stats:',
     formatFeatureBlock(features, meta),
     '',
-    'Datenqualitaet:',
+    'Lokale Datenqualitaet:',
     describeDataQuality(features, context),
+    '',
+    externalBlock,
     '',
     homeHistory,
     '',
@@ -159,16 +203,18 @@ function buildPrompt(match, features, context) {
     '',
     h2hHistory,
     '',
-    `Bewerte Form, ${meta.scoringLong}, defensive Stabilitaet, Tordifferenz/Punktdifferenz, Heim-/Auswaertslage und direkte Duelle.`,
-    'Gib keine sichere Wette aus, wenn sample size oder edge zu klein ist.'
+    `Bewerte in genau dieser Reihenfolge: Datenqualitaet, Teamform, ${meta.scoringLong}, Defensive, Heim-/Auswaertslage, H2H, Tabellenlage, Verletzungen/Sperren, Odds/Marktvergleich, API-Prediction.`,
+    'Wenn Odds implizite Wahrscheinlichkeiten deutlich von deiner Prognose abweichen, erklaere die Abweichung.',
+    'Wenn keine Odds oder keine Zusatzdaten verfuegbar sind, keine Value-Bet behaupten.',
+    'Antwort: reines JSON ohne Markdown.'
   ].join('\n');
 }
 
 async function callRemoteLlama(prompt) {
   const response = await axios.post(
     LLAMA_SERVER_URL,
-    { prompt, maxTokens: 512, temperature: 0.15, stop: ['\n\n'] },
-    { timeout: 20000 }
+    { prompt, maxTokens: 700, temperature: 0.12, stop: ['\n\n'] },
+    { timeout: 25000 }
   );
   return response.data ?? null;
 }
@@ -177,8 +223,19 @@ async function callOllama(prompt) {
   const host = OLLAMA_HOST.replace(/\/$/, '');
   const response = await axios.post(
     `${host}/api/generate`,
-    { model: OLLAMA_MODEL, prompt, stream: false, options: { temperature: 0.15, num_predict: 512 } },
-    { timeout: 30000 }
+    {
+      model: OLLAMA_MODEL,
+      prompt,
+      stream: false,
+      format: 'json',
+      options: {
+        temperature: 0.1,
+        top_p: 0.8,
+        repeat_penalty: 1.08,
+        num_predict: 700
+      }
+    },
+    { timeout: 45000 }
   );
   return response.data ?? null;
 }
@@ -232,7 +289,9 @@ function parseJsonSafe(value) {
 function getMatchRecord(matchId) {
   const db = getDb();
   const stmt = db.prepare(
-    `SELECT match_id, COALESCE(sport, 'football') AS sport, date, status, home_team, away_team, home_team_id, away_team_id
+    `SELECT match_id, COALESCE(sport, 'football') AS sport, date, status,
+            home_team, away_team, home_team_id, away_team_id,
+            league_id, league_name, league_country, season, round
      FROM matches
      WHERE match_id = @matchId`
   );
@@ -427,7 +486,7 @@ function normalizePrediction(payload, matchId, sport = 'football') {
   };
 }
 
-function simpleRulePredict(match, features, context) {
+function simpleRulePredict(match, features, context, externalContext) {
   const sport = match.sport ?? 'football';
   const meta = SPORT_PROMPT_META[sport] ?? SPORT_PROMPT_META.football;
   const sampleScore = getSampleScore(features);
@@ -437,37 +496,63 @@ function simpleRulePredict(match, features, context) {
   const diffEdge = clamp(-1, 1, (features.home_goal_diff_avg - features.away_goal_diff_avg) / 3) * 0.25;
   const attackEdge = clamp(-1, 1, (features.home_goals_avg - features.away_goals_avg) / 3) * 0.15;
   const homeAdvantage = sport === 'basketball' ? 0.04 : 0.07;
-  const edge = clamp(-0.8, 0.8, formEdge + ppgEdge + diffEdge + attackEdge + homeAdvantage);
+  const apiEdge = getExternalApiEdge(externalContext, context.homeTeam, context.awayTeam) * 0.12;
+  const edge = clamp(-0.85, 0.85, formEdge + ppgEdge + diffEdge + attackEdge + homeAdvantage + apiEdge);
 
   const drawBase = sport === 'basketball' ? 0.02 : clamp(0.12, 0.32, 0.28 - Math.abs(edge) * 0.18);
   const remaining = 1 - drawBase;
   const homeShare = clamp(0.12, 0.88, 0.5 + edge / 1.6);
   const probabilities = normalizeProbabilities({ home: remaining * homeShare, draw: drawBase, away: remaining * (1 - homeShare) });
   const prediction = pickPrediction(probabilities, sport);
-  const confidence = getRuleConfidence(edge, sampleScore, probabilities);
-  const recommendation = confidence < 0.55 ? 'Keine klare Wette' : prediction;
+  const externalQuality = externalContext?.quality?.score ?? 0;
+  const confidence = getRuleConfidence(edge, sampleScore, probabilities, externalQuality);
+  const recommendation = confidence < 0.58 ? 'Keine klare Wette' : prediction;
 
   return {
     match_id: match.match_id,
     prediction,
     probabilities,
     explanation: [
-      'Regelbasiertes Modell mit echten Stats statt geratenem Text.',
+      'Regelbasiertes Modell mit lokalen Stats plus API-Zusatzdaten.',
       `Edge=${round(edge)}, Datenbasis=${features.home_games}+${features.away_games} Spiele`,
       `Form ${round(features.home_form)} vs ${round(features.away_form)}`,
       `${meta.scoringLabel} fuer ${features.home_goals_avg} vs ${features.away_goals_avg}`,
       `${meta.scoringLabel} gegen ${features.home_goals_against_avg} vs ${features.away_goals_against_avg}`,
-      `Direkte Duelle im Prompt: ${(context.headToHead ?? []).length}`
+      `H2H=${(context.headToHead ?? []).length}`,
+      `Externe Daten=${externalContext?.quality?.label ?? 'schwach'} (${externalQuality}/100)`
     ].join(' | '),
     betting_advice: {
       recommendation,
       confidence,
-      reasoning: confidence < 0.55
-        ? 'Datenlage oder Vorteil ist zu schwach fuer eine stabile Empfehlung.'
-        : `Empfehlung basiert auf Form, ${meta.scoringLabel}-Differenz, Gegenschnitt und Heimvorteil.`
+      reasoning: confidence < 0.58
+        ? 'Datenlage, Marktvergleich oder Vorteil ist zu schwach fuer eine stabile Empfehlung.'
+        : `Empfehlung basiert auf Form, ${meta.scoringLabel}-Differenz, Gegenschnitt, Heimvorteil und API-Kontext.`
     },
     engine: 'rule-based'
   };
+}
+
+function addMeta(result, engine, prepared) {
+  return {
+    ...result,
+    engine,
+    data_quality: {
+      local: describeDataQuality(prepared.features, prepared.context),
+      external: prepared.externalContext?.quality ?? null
+    }
+  };
+}
+
+function getExternalApiEdge(externalContext, homeTeam, awayTeam) {
+  const prediction = externalContext?.apiPrediction;
+  if (!prediction?.percent) return 0;
+  const home = normalizeProbabilityValue(prediction.percent.home) ?? 0;
+  const away = normalizeProbabilityValue(prediction.percent.away) ?? 0;
+  let edge = home - away;
+  const winner = String(prediction.winner ?? '').toLowerCase();
+  if (winner && String(homeTeam ?? '').toLowerCase() === winner) edge += 0.1;
+  if (winner && String(awayTeam ?? '').toLowerCase() === winner) edge -= 0.1;
+  return clamp(-1, 1, edge);
 }
 
 function normalizeFeatures(row, sportHint) {
@@ -531,12 +616,13 @@ function getSampleScore(features) {
   return clamp(0, 1, total / 20);
 }
 
-function getRuleConfidence(edge, sampleScore, probabilities) {
+function getRuleConfidence(edge, sampleScore, probabilities, externalQuality = 0) {
   const sorted = [probabilities.home, probabilities.draw, probabilities.away].sort((a, b) => b - a);
   const margin = sorted[0] - sorted[1];
-  let confidence = 0.42 + Math.abs(edge) * 0.25 + margin * 0.4 + sampleScore * 0.18;
+  let confidence = 0.4 + Math.abs(edge) * 0.25 + margin * 0.38 + sampleScore * 0.17 + (externalQuality / 100) * 0.1;
   if (sampleScore < 0.35) confidence = Math.min(confidence, 0.55);
-  return round(clamp(0.35, 0.82, confidence));
+  if (externalQuality < 50) confidence = Math.min(confidence, 0.68);
+  return round(clamp(0.35, 0.84, confidence));
 }
 
 function buildHistoryKey(sport, teamId) { return `${sport}:${teamId}`; }
