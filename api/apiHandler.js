@@ -6,6 +6,7 @@ import { getDb } from '../data/db.js';
 dotenv.config();
 
 const FOOTBALL_BASE_URL = 'https://v3.football.api-sports.io/fixtures';
+const FOOTBALL_TEAMS_URL = 'https://v3.football.api-sports.io/teams';
 const BASKETBALL_BASE_URL = 'https://v1.basketball.api-sports.io/games';
 const DEFAULT_TIMEZONE = process.env.API_TIMEZONE ?? 'Europe/Berlin';
 const DEFAULT_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS) || 15000;
@@ -29,6 +30,55 @@ export async function fetchMatches(options = {}) {
   const { sport = 'football', mode = 'live', limit = 20, range } = options;
   if (sport === 'basketball') return fetchBasketballMatches({ mode, limit, range });
   return fetchFootballMatches({ mode, limit, range });
+}
+
+export async function searchTeams(query, options = {}) {
+  const { sport = 'football', limit = 8 } = options;
+  const normalizedQuery = String(query ?? '').trim();
+  if (!normalizedQuery) return [];
+
+  if (sport !== 'football') {
+    console.warn(`Team-Suche fuer Sportart "${sport}" ist noch nicht implementiert.`);
+    return [];
+  }
+
+  const apiKey = getFootballApiKey();
+  const params = new URLSearchParams({ search: normalizedQuery });
+  const teams = await safeRequest(
+    () => requestFootballTeams(params, apiKey, `football/team-search-${normalizedQuery}`),
+    `Team-Suche ${normalizedQuery}`
+  );
+
+  return teams
+    .map(mapFootballTeamSearchResult)
+    .filter((team) => team.id && team.name)
+    .slice(0, limit);
+}
+
+export async function fetchUpcomingMatchesForTeam(teamId, options = {}) {
+  const { sport = 'football', limit = 10 } = options;
+  const numericTeamId = Number(teamId);
+  if (!Number.isFinite(numericTeamId) || numericTeamId <= 0) return [];
+
+  if (sport !== 'football') {
+    console.warn(`Kommende Teamspiele fuer Sportart "${sport}" sind noch nicht implementiert.`);
+    return [];
+  }
+
+  const apiKey = getFootballApiKey();
+  const params = new URLSearchParams({
+    team: String(numericTeamId),
+    next: String(Math.max(Number(limit) || 10, 1)),
+    timezone: DEFAULT_TIMEZONE
+  });
+
+  const matches = await safeRequest(
+    () => requestFootballFixtures(params, apiKey, `football/team-${numericTeamId}-upcoming`),
+    `Kommende Spiele fuer Team ${numericTeamId}`
+  );
+
+  if (matches.length) saveMatches(matches, 'football');
+  return matches.slice(0, limit);
 }
 
 export function loadMatchesFromDb(mode, limit = 20, range, sport = 'football') {
@@ -350,6 +400,15 @@ async function requestFootballFixtures(params, apiKey, label) {
   return Array.isArray(payload.response) ? payload.response : [];
 }
 
+async function requestFootballTeams(params, apiKey, label) {
+  const payload = await requestApi(`${FOOTBALL_TEAMS_URL}?${params.toString()}`, {
+    headers: { 'x-apisports-key': apiKey, 'x-rapidapi-host': 'v3.football.api-sports.io' },
+    label
+  });
+
+  return Array.isArray(payload.response) ? payload.response : [];
+}
+
 async function requestBasketballGames(params, apiKey, label) {
   const payload = await requestApi(`${BASKETBALL_BASE_URL}?${params.toString()}`, {
     headers: { 'x-apisports-key': apiKey, 'x-rapidapi-host': 'v1.basketball.api-sports.io' },
@@ -430,6 +489,20 @@ function mapFootballMatch(match) {
     away_team: awayTeam.name ?? match?.away_team ?? null,
     home_goals: isNumber(goals.home) ? goals.home : null,
     away_goals: isNumber(goals.away) ? goals.away : null
+  };
+}
+
+function mapFootballTeamSearchResult(entry) {
+  const team = entry?.team ?? entry ?? {};
+  const venue = entry?.venue ?? {};
+  return {
+    id: Number(team.id),
+    name: team.name ?? null,
+    country: team.country ?? null,
+    code: team.code ?? null,
+    founded: team.founded ?? null,
+    venue: venue.name ?? null,
+    sport: 'football'
   };
 }
 
