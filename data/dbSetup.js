@@ -32,7 +32,24 @@ export function setupDatabase() {
   ensureColumn(db, 'matches', 'home_team_id', 'INTEGER');
   ensureColumn(db, 'matches', 'away_team_id', 'INTEGER');
   ensureColumn(db, 'matches', 'sport', 'TEXT');
+
   ensureColumn(db, 'stats', 'sport', 'TEXT');
+  ensureColumn(db, 'stats', 'home_games', 'INTEGER DEFAULT 0');
+  ensureColumn(db, 'stats', 'away_games', 'INTEGER DEFAULT 0');
+  ensureColumn(db, 'stats', 'home_win_rate', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'away_win_rate', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'home_draw_rate', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'away_draw_rate', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'home_loss_rate', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'away_loss_rate', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'home_goals_against_avg', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'away_goals_against_avg', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'home_goal_diff_avg', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'away_goal_diff_avg', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'home_points_per_game', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'away_points_per_game', 'REAL DEFAULT 0');
+  ensureColumn(db, 'stats', 'home_recent_form', 'TEXT DEFAULT ""');
+  ensureColumn(db, 'stats', 'away_recent_form', 'TEXT DEFAULT ""');
 
   db.exec(`
     UPDATE matches SET sport = 'football' WHERE sport IS NULL;
