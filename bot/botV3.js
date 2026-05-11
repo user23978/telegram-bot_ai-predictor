@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import { Telegraf, Markup } from 'telegraf';
 
-import { fetchMatches, fetchUpcomingMatchesForTeam, loadMatchesFromDb, searchTeams } from '../api/matchBrowserV2.js';
+import { fetchMatches, fetchUpcomingMatchesForTeam, loadMatchesFromDb, searchTeams } from '../api/matchBrowserV3.js';
 import { getPredictionDebug, predictMatch } from '../ai/predictorV3.js';
 import { predictTeamMatchup } from '../ai/matchupPredictor.js';
 import { getDb } from '../data/db.js';
@@ -322,9 +322,11 @@ function formatPredictionCore(result, home, away, manual) {
   const probs = result.probabilities ?? {};
   const betting = result.betting_advice ?? {};
   const diag = result.data_quality?.diagnostics;
+  const aiError = result.data_quality?.ai_error;
   return [
     `<b>${manual ? 'Manuelles Matchup' : 'Match'}:</b> ${escapeHtml(home)} vs ${escapeHtml(away)}`,
     `<b>Engine:</b> ${escapeHtml(result.engine ?? 'unknown')}`,
+    aiError ? `<b>AI-Fallback Grund:</b> ${escapeHtml(aiError)}` : null,
     diag ? `<b>Daten:</b> ${escapeHtml(diag.localQualityLabel)} | Samples ${escapeHtml(diag.totalGames)} | H2H ${escapeHtml(diag.h2hCount)} | usable ${diag.hasUsableSamples ? 'ja' : 'nein'}` : null,
     manual ? '<i>Keine echte kommende Fixture, Prediction basiert nur auf historischen Daten.</i>' : null,
     '',
