@@ -166,10 +166,7 @@ async function tryOllama(prepared) {
       stream: false,
       format: 'json',
       messages: [
-        {
-          role: 'system',
-          content: 'Du bist ein Fussball-Analysemodell. Antworte ausschliesslich mit gueltigem JSON. Kein Markdown, kein Fliesstext, keine Erklaerung ausserhalb des JSON.'
-        },
+        { role: 'system', content: 'Return exactly one flat JSON object. Do not wrap it in response/result/data. No markdown.' },
         { role: 'user', content: prompt }
       ],
       options: ollamaOptions()
@@ -178,7 +175,7 @@ async function tryOllama(prepared) {
     const parsed = parsePayload(response.data);
     const normalized = normalizePrediction(parsed, prepared);
     if (normalized) return { result: normalized, error: null };
-    return { result: null, error: `Ollama chat returned invalid JSON: ${preview(response.data)}` };
+    return { result: null, error: `Ollama chat returned unusable JSON: ${preview(response.data)}` };
   } catch (chatError) {
     console.warn('manual-matchup ollama chat failed:', chatError?.message ?? chatError);
   }
@@ -195,7 +192,7 @@ async function tryOllama(prepared) {
     const parsed = parsePayload(response.data);
     const normalized = normalizePrediction(parsed, prepared);
     if (normalized) return { result: normalized, error: null };
-    return { result: null, error: `Ollama generate returned invalid JSON: ${preview(response.data)}` };
+    return { result: null, error: `Ollama generate returned unusable JSON: ${preview(response.data)}` };
   } catch (generateError) {
     const message = generateError?.response?.data?.error ?? generateError?.message ?? String(generateError);
     console.warn('manual-matchup ollama generate failed:', message);
@@ -205,8 +202,8 @@ async function tryOllama(prepared) {
 
 function ollamaOptions() {
   return {
-    temperature: 0.03,
-    top_p: 0.7,
+    temperature: 0.02,
+    top_p: 0.65,
     repeat_penalty: 1.08,
     num_ctx: Number(process.env.OLLAMA_NUM_CTX) || 8192,
     num_predict: Number(process.env.OLLAMA_NUM_PREDICT) || 900
@@ -216,6 +213,13 @@ function ollamaOptions() {
 function buildPrompt(prepared) {
   const raw = {
     matchup: { home: prepared.home, away: prepared.away },
+    required_output: {
+      match_id: 'manual-matchup',
+      prediction: 'Heimsieg | Unentschieden | Auswaertssieg',
+      probabilities: { home: 'number 0..1', draw: 'number 0..1', away: 'number 0..1' },
+      explanation: 'short string',
+      betting_advice: { recommendation: 'string', confidence: 'number 0..1', reasoning: 'short string' }
+    },
     features: prepared.features,
     diagnostics: prepared.diagnostics,
     history: {
@@ -226,18 +230,20 @@ function buildPrompt(prepared) {
   };
 
   return [
-    'Dieses Match ist virtuell/manuell, weil keine kommende Fixture verfuegbar ist.',
-    'Nutze nur die historischen Daten. Behaupte keine aktuellen Verletzungen, Quoten oder Aufstellungen.',
-    'Wenn Samples schwach sind, confidence niedrig halten und keine starke Wette empfehlen.',
-    'Gib NUR valides JSON mit exakt diesen Feldern aus:',
-    '{"match_id":"manual-matchup","prediction":"Heimsieg|Unentschieden|Auswaertssieg","probabilities":{"home":0.0,"draw":0.0,"away":0.0},"explanation":"...","betting_advice":{"recommendation":"...","confidence":0.0,"reasoning":"..."}}',
+    'Manual football matchup prediction. No real upcoming fixture is available.',
+    'Use only historical data. Do not invent injuries, odds, lineups or news.',
+    'Return exactly one flat JSON object with keys: match_id, prediction, probabilities, explanation, betting_advice.',
+    'Do NOT use wrapper keys like response, result, analysis, data, teams, h2h_results.',
     'RAW_DATA_JSON:',
     JSON.stringify(raw, null, 2)
   ].join('\n');
 }
 
 function normalizePrediction(payload, prepared) {
+  payload = unwrapPayload(payload);
+  payload = coercePayload(payload, prepared);
   if (!payload?.probabilities) return null;
+
   const probs = normalizeProbabilities(payload.probabilities);
   let confidence = prob(payload?.betting_advice?.confidence) ?? 0.35;
   if (!prepared.diagnostics.hasUsableSamples) confidence = Math.min(confidence, 0.45);
@@ -254,6 +260,46 @@ function normalizePrediction(payload, prepared) {
       reasoning: String(payload?.betting_advice?.reasoning ?? 'Konservative Bewertung wegen manueller Fixture.').slice(0, 1200)
     }
   };
+}
+
+function unwrapPayload(payload) {
+  if (!payload || typeof payload !== 'object') return payload;
+  for (const key of ['response', 'result', 'analysis', 'data', 'prediction_result']) {
+    if (payload[key] && typeof payload[key] === 'object') return unwrapPayload(payload[key]);
+  }
+  return payload;
+}
+
+function coercePayload(payload, prepared) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.probabilities) return payload;
+
+  const homeKeys = ['home', 'home_probability', 'home_win_probability', 'home_prob'];
+  const drawKeys = ['draw', 'draw_probability', 'draw_prob'];
+  const awayKeys = ['away', 'away_probability', 'away_win_probability', 'away_prob'];
+  const home = firstProbability(payload, homeKeys);
+  const draw = firstProbability(payload, drawKeys);
+  const away = firstProbability(payload, awayKeys);
+
+  if (home !== null && draw !== null && away !== null) {
+    return {
+      match_id: 'manual-matchup',
+      prediction: payload.prediction ?? payload.predicted_winner ?? payload.outcome ?? null,
+      probabilities: { home, draw, away },
+      explanation: payload.explanation ?? payload.reasoning ?? payload.analysis_text ?? 'Aus verschachtelter Gemma-Antwort normalisiert.',
+      betting_advice: payload.betting_advice ?? { recommendation: 'Keine klare Wette', confidence: payload.confidence ?? 0.45, reasoning: 'Normalisierte Gemma-Antwort.' }
+    };
+  }
+
+  return payload;
+}
+
+function firstProbability(payload, keys) {
+  for (const key of keys) {
+    const value = prob(payload[key]);
+    if (value !== null) return value;
+  }
+  return null;
 }
 
 function rulePredict(prepared) {
@@ -282,11 +328,7 @@ function withMeta(result, engine, prepared) {
   return {
     ...result,
     engine,
-    data_quality: {
-      diagnostics: prepared.diagnostics,
-      manual_matchup: true,
-      ai_error: prepared.aiError ?? null
-    },
+    data_quality: { diagnostics: prepared.diagnostics, manual_matchup: true, ai_error: prepared.aiError ?? null },
     manual_matchup: { home: prepared.home, away: prepared.away }
   };
 }
