@@ -10,6 +10,9 @@ const FOOTBALL_TEAMS_URL = 'https://v3.football.api-sports.io/teams';
 const BASKETBALL_BASE_URL = 'https://v1.basketball.api-sports.io/games';
 const DEFAULT_TIMEZONE = process.env.API_TIMEZONE ?? 'Europe/Berlin';
 const DEFAULT_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS) || 15000;
+const FOOTBALL_HISTORY_DAYS = Number(process.env.API_FOOTBALL_HISTORY_DAYS) || 730;
+const FREE_HISTORY_FROM = process.env.API_FOOTBALL_FREE_HISTORY_FROM ?? '2022-01-01';
+const FREE_HISTORY_TO = process.env.API_FOOTBALL_FREE_HISTORY_TO ?? '2024-12-31';
 
 const MATCH_ID_OFFSETS = {
   football: 0,
@@ -286,9 +289,37 @@ async function fetchFootballTeamHistory(teamId, last) {
     `Historie Fussball-Team ${teamId}`
   );
 
-  const finished = matches.filter(hasFinalScore).slice(0, last);
+  let finished = sortFinishedMatches(matches).slice(0, last);
+  if (!finished.length) {
+    finished = await fetchFootballTeamHistoryByDateRanges(teamId, last, apiKey);
+  }
+
   if (finished.length) saveMatches(finished, 'football');
   return finished;
+}
+
+async function fetchFootballTeamHistoryByDateRanges(teamId, last, apiKey) {
+  const ranges = buildFootballHistoryRanges();
+
+  for (const range of ranges) {
+    const params = new URLSearchParams({
+      team: String(teamId),
+      from: range.from,
+      to: range.to,
+      timezone: DEFAULT_TIMEZONE
+    });
+
+    const label = `football/team-${teamId}-history-${range.label}`;
+    const matches = await safeRequest(
+      () => requestFootballFixtures(params, apiKey, label),
+      `Historie Fallback Fussball-Team ${teamId} (${range.label})`
+    );
+
+    const finished = sortFinishedMatches(matches).slice(0, last);
+    if (finished.length) return finished;
+  }
+
+  return [];
 }
 
 async function fetchBasketballTeamHistory(teamId, last) {
@@ -323,9 +354,37 @@ async function fetchFootballHeadToHead(teamAId, teamBId, last) {
     `Head-to-head Fussball ${teamAId} vs ${teamBId}`
   );
 
-  const finished = matches.filter(hasFinalScore).slice(0, last);
+  let finished = sortFinishedMatches(matches).slice(0, last);
+  if (!finished.length) {
+    finished = await fetchFootballHeadToHeadByDateRanges(teamAId, teamBId, last, apiKey);
+  }
+
   if (finished.length) saveMatches(finished, 'football');
   return finished;
+}
+
+async function fetchFootballHeadToHeadByDateRanges(teamAId, teamBId, last, apiKey) {
+  const ranges = buildFootballHistoryRanges();
+
+  for (const range of ranges) {
+    const params = new URLSearchParams({
+      h2h: `${teamAId}-${teamBId}`,
+      from: range.from,
+      to: range.to,
+      timezone: DEFAULT_TIMEZONE
+    });
+
+    const label = `football/h2h-${teamAId}-${teamBId}-history-${range.label}`;
+    const matches = await safeRequest(
+      () => requestFootballFixtures(params, apiKey, label),
+      `H2H Fallback Fussball ${teamAId} vs ${teamBId} (${range.label})`
+    );
+
+    const finished = sortFinishedMatches(matches).slice(0, last);
+    if (finished.length) return finished;
+  }
+
+  return [];
 }
 
 async function fetchBasketballHeadToHead(teamAId, teamBId, last) {
@@ -626,6 +685,25 @@ function parseBasketballLeagues() {
     .filter((value, index, array) => array.indexOf(value) === index);
 }
 
+function buildFootballHistoryRanges() {
+  const today = formatDateOffset(0);
+  const currentFrom = formatDateOffset(-FOOTBALL_HISTORY_DAYS);
+  const ranges = [
+    { label: 'current-window', from: currentFrom, to: today },
+    { label: 'free-plan-window', from: FREE_HISTORY_FROM, to: FREE_HISTORY_TO }
+  ];
+
+  return ranges.filter((range, index, arr) =>
+    range.from && range.to && arr.findIndex((item) => item.from === range.from && item.to === range.to) === index
+  );
+}
+
+function sortFinishedMatches(matches) {
+  return [...(Array.isArray(matches) ? matches : [])]
+    .filter(hasFinalScore)
+    .sort((a, b) => parseTime(extractIsoDateFootball(b?.fixture, b)) - parseTime(extractIsoDateFootball(a?.fixture, a)));
+}
+
 function getFootballApiKey() {
   const apiKey = process.env.API_FOOTBALL_KEY;
   if (!apiKey) throw new Error('API_FOOTBALL_KEY not set in environment (.env)');
@@ -688,7 +766,7 @@ function splitStoredMatchId(matchId, sportHint = 'football') {
 
 function parseTime(iso) {
   const parsed = iso ? Date.parse(iso) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 }
 
 function isNumber(value) {
