@@ -1,112 +1,162 @@
+# GamblerGPT - AI-Powered Sports Prediction Bot
 
-# GamblerGPT - AI‑Powered Sports Betting Assistant
+GamblerGPT ist eine Node.js-Anwendung mit Telegram-Bot, SQLite-Datenbank, API-Football/API-Sports-Daten, lokaler Feature-Engine und optionalem lokalen Ollama-LLM. Die v2-Pipeline ist darauf ausgelegt, zuverlässiger zu predicten, fehlende Daten klar zu erkennen und nicht mehr aus leeren Stats wilde Empfehlungen zu basteln. Ja, revolutionär: keine Fantasie-Zahlen füttern.
 
-GamblerGPT ist eine Node.js‑Anwendung, die Fußball‑ und Basketballspiele analysiert und Vorhersagen über einen CLI‑Pipeline oder einen Telegram‑Bot liefert. Das Programm ruft Live‑ und bevorstehende Spiele ab, berechnet Features aus Spieldaten und nutzt entweder einen regelbasierten Algorithmus oder ein lokales LLM, um Vorhersagen zu generieren. Der Telegram‑Bot bietet eine interaktive Oberfläche zum Auswählen von Sportarten, Durchstöbern von Spielen und Abrufen von Vorhersagen.
+## Was v2 verbessert
 
-## Features
-
-- Abruf von Live‑ und zukünftigen Fußball‑ und Basketballspielen über den API‑Football‑Service.
-- Berechnung von Features und Generierung von Vorhersagen mithilfe eingebauter Algorithmen oder eines lokalen LLM (über Ollama).
-- SQLite‑Datenbank zum Speichern von Spieldaten und Features.
-- CLI‑Pipeline, die Daten abruft, Features berechnet und eine Vorhersage für ein Spiel ausgibt.
-- Telegram‑Bot auf Basis von Telegraf, der Kommandos zum Durchstöbern von Spielen und Anfordern von Vorhersagen bietet.
-- Optionale Integration mit Ollama, um lokale LLM‑Modelle (z. B. `llama3`) für Vorhersagen zu nutzen.
+- Robuster Predictor: `ai/predictorV2.js`
+- Neuer Telegram-Bot: `bot/botV2.js`
+- `npm run bot` startet jetzt automatisch v2
+- API-Fetch-Diagnosen werden in `api_fetch_log` gespeichert
+- Raw-API-Matches werden als `raw_json` gespeichert
+- Liga, Land, Saison und Runde werden gespeichert
+- FeatureEngine nutzt primär Team-IDs statt nur Teamnamen
+- Debug zeigt lokale Samples, H2H, externe Daten und letzte API-Fetches
+- Fehlende Daten werden nicht mehr als echte 0-Leistung interpretiert
+- Bei schwacher Datenlage wird die Confidence automatisch konservativer begrenzt
 
 ## Voraussetzungen
 
-- Node.js (Version 16 oder höher)
-- API‑Schlüssel:
-  - **API_FOOTBALL_KEY** – Dein API‑Football‑Schlüssel zum Abrufen von Spieldaten.
-  - **TELEGRAM_BOT_TOKEN** – Dein Telegram‑Bot‑Token.
-- (Optional) [Ollama](https://ollama.ai) installiert mit einem heruntergeladenen Modell (z. B. `llama3`), wenn du lokale LLM‑Vorhersagen nutzen möchtest.
+- Node.js 18 oder höher empfohlen
+- API-Football/API-Sports Key
+- Telegram Bot Token
+- Optional: Ollama für lokale LLM-Predictions
 
 ## Setup
 
-1. Abhängigkeiten installieren:
-
-   ```bash
-   npm install
-   ```
-
-2. Erstelle eine Datei `.env` im Projektverzeichnis mit folgenden Variablen:
-
-   ```ini
-   API_FOOTBALL_KEY=your_api_key
-   TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-
-   # Optional: überschreibe Host/Port für deinen lokalen Ollama‑API
-   # OLLAMA_HOST=http://localhost:11434
-   # OLLAMA_MODEL=llama3
-
-   # Optional: Zeitzone für API‑Abfragen anpassen (Standard: Europe/Berlin)
-   # API_TIMEZONE=Europe/Berlin
-
-   # Optional: eigene LLM‑Server‑URL (falls du einen anderen Endpunkt nutzt)
-   # LLAMA_SERVER_URL=http://custom-llama-endpoint
-   ```
-
-   Nur `API_FOOTBALL_KEY` und `TELEGRAM_BOT_TOKEN` sind erforderlich. Die übrigen Variablen konfigurieren optionale Features wie das lokale LLM oder eine benutzerdefinierte Zeitzone.
-
-### Back4App Deployment
-
-Back4App führt regelmäßige HTTP-Health-Checks durch. Damit der Check erfolgreich ist, stellt `server.js` einen schlanken HTTP-Server bereit und startet parallel den Telegram-Bot. Verwende für Deployments auf Back4App den Befehl `npm start`, damit der Health-Check auf Port `8080` beantwortet wird, während der Bot im Hintergrund weiterläuft. Stelle sicher, dass die notwendigen Umgebungsvariablen (`API_FOOTBALL_KEY`, `TELEGRAM_BOT_TOKEN` sowie optional weitere) im Back4App-Dashboard hinterlegt sind.
-
-## Verwendung
-
-### CLI‑Pipeline
-
-Die CLI‑Pipeline richtet die Datenbank ein, ruft Live‑Spieldaten ab, berechnet Features und gibt eine Vorhersage für das erste verfügbare Spiel aus. Starte sie mit:
-
 ```bash
-npm start
+npm install
 ```
 
-### Telegram‑Bot
+Erstelle eine `.env`:
 
-Starte den Telegram‑Bot mit:
+```ini
+API_FOOTBALL_KEY=your_api_key
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+API_TIMEZONE=Europe/Berlin
+
+# Ollama lokal
+OLLAMA_HOST=http://localhost:11434
+OLLAMA_MODEL=gemma3:27b
+OLLAMA_NUM_CTX=8192
+OLLAMA_NUM_PREDICT=900
+OLLAMA_TIMEOUT_MS=90000
+
+# Optional: eigener Remote-LLM-Endpunkt
+# LLAMA_SERVER_URL=http://custom-llama-endpoint
+
+# Optional
+# API_TIMEOUT_MS=15000
+# TEAM_HISTORY_SIZE=12
+# H2H_HISTORY_SIZE=10
+```
+
+## Modell-Empfehlung für Ollama
+
+Wenn Leistung egal ist und du einfach möglichst schlaue lokale Predictions willst, nimm zuerst:
+
+```bash
+ollama pull gemma3:27b
+```
+
+Dann in `.env`:
+
+```ini
+OLLAMA_MODEL=gemma3:27b
+```
+
+Alternative, falls du mehr reasoning willst:
+
+```bash
+ollama pull qwen3:32b
+```
+
+Dann:
+
+```ini
+OLLAMA_MODEL=qwen3:32b
+```
+
+Meine Reihenfolge für dieses Projekt:
+
+1. `gemma3:27b` - sehr guter Allrounder, großer Kontext, gut für strukturierte Analyse.
+2. `qwen3:32b` - starkes Reasoning, kann bei nüchternen JSON-Analysen sehr gut sein.
+3. `deepseek-r1:32b` - starkes Reasoning, aber kann manchmal zu viel Denktext/Format-Müll produzieren, daher für JSON-Bot etwas nerviger.
+
+## Bot starten
 
 ```bash
 npm run bot
 ```
 
-Sobald der Bot läuft, kannst du ihm in Telegram `/start` oder `/matches` senden, um eine Sportart zu wählen und Spiele zu durchsuchen. Du kannst auch direkt eine Vorhersage anfordern:
+Alter Bot bleibt als Backup:
 
-```
-/predict <match_id>
+```bash
+npm run bot:old
 ```
 
-Beispiel:
+## CLI-Test
 
+```bash
+npm run predict:test
 ```
+
+## Telegram-Befehle
+
+```txt
+/start
+/matches
+/search Bayern
+/team Real Madrid
 /predict 1335952
+/debug_match 1335952
 ```
 
-Der Bot antwortet mit dem prognostizierten Ausgang, Wahrscheinlichkeiten und einer Wett‑Empfehlung. Zusätzlich gibt es Schaltflächen für die Navigation zurück zu Live‑ oder kommenden Spielen.
+Der Bot nutzt Inline-Buttons für:
 
-### Ollama‑Integration (Optional)
+- Sportart auswählen
+- Live-Spiele
+- heutige Spiele
+- kommende Spiele
+- Team-Suche
+- Match auswählen
+- Prediction berechnen
+- Debug-Daten anzeigen
 
-Um Vorhersagen eines lokalen LLM zu aktivieren:
+## Debugging
 
-1. Installiere [Ollama](https://ollama.ai) und lade ein Modell herunter, beispielsweise:
+Wenn Predictions komisch sind, zuerst:
 
-   ```bash
-   ollama pull llama3
-   ```
+```txt
+/debug_match <match_id>
+```
 
-2. Stelle sicher, dass der Ollama‑Dienst läuft (z. B. `ollama serve`). Standardmäßig lauscht er auf `http://localhost:11434`.
+Wichtig sind diese Werte:
 
-3. Setze `OLLAMA_MODEL=llama3` (oder deinen Modellnamen) in `.env`. Du kannst auch `OLLAMA_HOST` oder `LLAMA_SERVER_URL` anpassen, wenn dein Server woanders läuft.
+- `Feature Row`: gibt es berechnete Stats?
+- `Usable Samples`: genug lokale Daten vorhanden?
+- `Home History` / `Away History`: wurden letzte Spiele gefunden?
+- `H2H`: direkte Duelle gefunden?
+- `API Prediction`, `Odds`, `Standings`: externe API-Daten vorhanden?
+- `Letzte API Fetches`: zeigt HTTP/API-Fehler und Response Counts
 
-4. Starte die CLI oder den Bot wie gewohnt. Wenn eine Vorhersage angefordert wird, ruft das Programm das lokale LLM auf. Liefert das Modell ein gültiges JSON mit den erwarteten Feldern, kennzeichnet der Bot das Ergebnis als `Ollama-Server (lokal)`. Andernfalls greift er auf den regelbasierten Prädiktor zurück.
+Wenn überall 0 steht, ist es jetzt sichtbar, ob die API nichts liefert, die Team-IDs fehlen oder wirklich keine historischen Spiele in der DB liegen.
 
-## Datenbank
+## Sicherheit bei Predictions
 
-Dieses Projekt nutzt SQLite über `better-sqlite3`, um Spieldaten und berechnete Features in `data/gamblergpt.db` zu speichern. Die Datenbank und die benötigten Tabellen werden automatisch erstellt, wenn du die CLI oder den Bot startest.
+Der Bot gibt keine garantierten Wetten aus. Wenn Daten schwach sind, wird die Confidence absichtlich reduziert und oft `Keine klare Wette` ausgegeben. Das ist kein Bug, das ist der Bot, der nicht komplett wahnsinnig ist.
 
-## Mitwirken
+## Projektstruktur
 
-Beiträge sind willkommen! Eröffne gerne Issues oder sende Pull Requests für Verbesserungen, Bugfixes oder neue Features.
+```txt
+api/apiHandler.js       API-Fetching, Speicherung, Fetch-Logs
+api/footballContext.js  Odds, Injuries, Standings, API-Prediction
+features/featureEngine.js lokale Stats aus historischen Matches
+ai/predictorV2.js       robuster Predictor + Ollama Prompting
+bot/botV2.js            Telegram UI mit Buttons
+data/dbSetup.js         SQLite Tabellen und Migrationen
+```
 
 ## Haftungsausschluss
 
-Dieses Projekt dient ausschließlich zu Lern‑ und Informationszwecken. Die vom Programm erzeugten Vorhersagen stellen keine finanzielle Beratung dar. Nutze die Informationen verantwortungsbewusst und auf eigenes Risiko.
+Nur Analyse und Lernprojekt. Keine finanzielle Beratung. Wette nicht mit Geld, das du brauchst. Der Kapitalismus ist schon peinlich genug.
