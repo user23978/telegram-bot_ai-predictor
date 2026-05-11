@@ -7,7 +7,7 @@ import {
   loadMatchesFromDb,
   searchTeams
 } from '../api/apiHandler.js';
-import { getPredictionDebug, predictMatch } from '../ai/predictorV2.js';
+import { getPredictionDebug, predictMatch } from '../ai/predictorV3.js';
 import { getDb } from '../data/db.js';
 import { setupDatabase } from '../data/dbSetup.js';
 
@@ -57,7 +57,7 @@ const SPORT_KEYBOARD = (sport) => Markup.inlineKeyboard([
 
 bot.start(async (ctx) => {
   await ctx.reply([
-    'Willkommen bei GamblerGPT v2.',
+    'Willkommen bei GamblerGPT v3.',
     '',
     'Ich nutze API-Daten, Team-Historie, H2H, Odds, Injuries, Standings, lokale Stats und einen robusteren Predictor.',
     '',
