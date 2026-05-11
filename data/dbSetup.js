@@ -26,6 +26,18 @@ export function setupDatabase() {
       away_goals_avg REAL,
       FOREIGN KEY (match_id) REFERENCES matches (match_id)
     );
+
+    CREATE TABLE IF NOT EXISTS api_fetch_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      label TEXT NOT NULL,
+      ok INTEGER NOT NULL DEFAULT 0,
+      status INTEGER,
+      response_count INTEGER DEFAULT 0,
+      error TEXT,
+      url TEXT,
+      params TEXT
+    );
   `);
 
   ensureColumn(db, 'matches', 'status', 'TEXT');
@@ -37,6 +49,7 @@ export function setupDatabase() {
   ensureColumn(db, 'matches', 'league_country', 'TEXT');
   ensureColumn(db, 'matches', 'season', 'INTEGER');
   ensureColumn(db, 'matches', 'round', 'TEXT');
+  ensureColumn(db, 'matches', 'raw_json', 'TEXT');
 
   ensureColumn(db, 'stats', 'sport', 'TEXT');
   ensureColumn(db, 'stats', 'home_games', 'INTEGER DEFAULT 0');
