@@ -1,12 +1,13 @@
 {
   "name": "gamblergpt",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Football analytics and Telegram bot rewritten in Node.js",
   "type": "module",
   "main": "main.js",
   "scripts": {
     "start": "node server.js",
-    "bot": "node bot/botV2.js",
+    "bot": "node bot/botV3.js",
+    "bot:v2": "node bot/botV2.js",
     "bot:old": "node bot/bot.js",
     "predict:test": "node main.js"
   },
