@@ -5,7 +5,7 @@ import { setupDatabase } from './data/dbSetup.js';
 import { DB_PATH } from './data/db.js';
 import { fetchMatches } from './api/apiHandler.js';
 import { calculateFeatures } from './features/featureEngine.js';
-import { predictMatch } from './ai/predictor.js';
+import { predictMatch } from './ai/predictorV2.js';
 
 const DATABASE_PATH = DB_PATH;
 
@@ -19,7 +19,7 @@ async function main() {
   ensureDatabase();
 
   console.log('\nHole Spieldaten von API...');
-  const matches = await fetchMatches({ mode: 'live' });
+  const matches = await fetchMatches({ sport: 'football', mode: 'upcoming', limit: 10 });
   console.log(`${matches.length} Spiele geladen.`);
 
   console.log('\nBerechne Features...');
@@ -27,20 +27,8 @@ async function main() {
   console.log(`Features gespeichert (${features.length}).`);
 
   console.log('\nStarte KI-Vorhersage...');
-  let matchId = null;
-  if (matches.length > 0) {
-    const first = matches[0];
-    if (first && typeof first === 'object') {
-      const fixture = first.fixture;
-      if (fixture && typeof fixture === 'object' && fixture.id) {
-        matchId = fixture.id;
-      } else if (first.id) {
-        matchId = first.id;
-      } else if (first.match_id) {
-        matchId = first.match_id;
-      }
-    }
-  }
+  const first = matches[0];
+  const matchId = first?.match_id ?? first?.fixture?.id ?? first?.id ?? null;
 
   if (matchId === null) {
     console.log('Konnte match_id nicht aus API-Daten ermitteln. Ueberspringe Prediction.');
