@@ -15,6 +15,8 @@ export function calculateFeatures(options = {}) {
         date,
         home_team,
         away_team,
+        home_team_id,
+        away_team_id,
         home_goals,
         away_goals
       FROM matches
@@ -92,8 +94,14 @@ export function calculateFeatures(options = {}) {
       : sportMatches.filter((match) => match.match_id === targetMatchId);
 
     for (const match of targetMatches) {
-      const homeStats = calcTeamStats(sportMatches, match, match.home_team);
-      const awayStats = calcTeamStats(sportMatches, match, match.away_team);
+      const homeStats = calcTeamStats(sportMatches, match, {
+        id: match.home_team_id,
+        name: match.home_team
+      });
+      const awayStats = calcTeamStats(sportMatches, match, {
+        id: match.away_team_id,
+        name: match.away_team
+      });
 
       rows.push({
         match_id: match.match_id,
@@ -132,7 +140,7 @@ export function calculateFeatures(options = {}) {
   return rows;
 }
 
-function calcTeamStats(matches, currentMatch, teamName, windowSize = DEFAULT_WINDOW_SIZE) {
+function calcTeamStats(matches, currentMatch, teamRef, windowSize = DEFAULT_WINDOW_SIZE) {
   const empty = {
     games: 0,
     wins: 0,
@@ -149,7 +157,9 @@ function calcTeamStats(matches, currentMatch, teamName, windowSize = DEFAULT_WIN
     recentForm: ''
   };
 
-  if (!teamName) return empty;
+  const teamId = toNumber(teamRef?.id);
+  const teamName = normalizeName(teamRef?.name);
+  if (teamId === null && !teamName) return empty;
 
   const currentDate = currentMatch.date ? toDate(currentMatch.date) : null;
   const cutoff = currentDate ? shiftDate(currentDate, -LOOKBACK_DAYS) : null;
@@ -163,10 +173,9 @@ function calcTeamStats(matches, currentMatch, teamName, windowSize = DEFAULT_WIN
       const date = toDate(match.date);
       if (!date) return false;
 
-      const isTeam = match.home_team === teamName || match.away_team === teamName;
       const beforeCurrent = currentDate ? date < currentDate : true;
       const afterCutoff = cutoff ? date >= cutoff : true;
-      return isTeam && beforeCurrent && afterCutoff;
+      return isSameTeam(match, teamId, teamName) && beforeCurrent && afterCutoff;
     })
     .sort((a, b) => (toDate(b.date)?.getTime() ?? 0) - (toDate(a.date)?.getTime() ?? 0))
     .slice(0, windowSize);
@@ -184,7 +193,7 @@ function calcTeamStats(matches, currentMatch, teamName, windowSize = DEFAULT_WIN
   const formMarkers = [];
 
   relevant.forEach((match, index) => {
-    const isHome = match.home_team === teamName;
+    const isHome = isTeamHome(match, teamId, teamName);
     const goalsFor = toNumber(isHome ? match.home_goals : match.away_goals);
     const goalsAgainst = toNumber(isHome ? match.away_goals : match.home_goals);
     if (goalsFor === null || goalsAgainst === null) return;
@@ -236,6 +245,22 @@ function calcTeamStats(matches, currentMatch, teamName, windowSize = DEFAULT_WIN
   };
 }
 
+function isSameTeam(match, teamId, teamName) {
+  return isTeamHome(match, teamId, teamName) || isTeamAway(match, teamId, teamName);
+}
+
+function isTeamHome(match, teamId, teamName) {
+  const homeId = toNumber(match.home_team_id);
+  if (teamId !== null && homeId !== null && homeId === teamId) return true;
+  return Boolean(teamName && normalizeName(match.home_team) === teamName);
+}
+
+function isTeamAway(match, teamId, teamName) {
+  const awayId = toNumber(match.away_team_id);
+  if (teamId !== null && awayId !== null && awayId === teamId) return true;
+  return Boolean(teamName && normalizeName(match.away_team) === teamName);
+}
+
 function resolveTargetMatchId(options) {
   if (typeof options === 'number' || typeof options === 'string') return toNumber(options);
   if (!options || typeof options !== 'object') return null;
@@ -256,6 +281,10 @@ function toNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeName(value) {
+  return String(value ?? '').trim().toLowerCase();
 }
 
 function shiftDate(date, days) {
