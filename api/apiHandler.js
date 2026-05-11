@@ -81,15 +81,31 @@ export async function fetchUpcomingMatchesForTeam(teamId, options = {}) {
   return matches.slice(0, limit);
 }
 
+export function getRecentApiFetchLog(limit = 20) {
+  const db = getDb();
+  try {
+    return db.prepare(`
+      SELECT created_at, label, ok, status, response_count, error, url, params
+      FROM api_fetch_log
+      ORDER BY id DESC
+      LIMIT @limit
+    `).all({ limit: Math.max(Number(limit) || 20, 1) });
+  } catch {
+    return [];
+  }
+}
+
 export function loadMatchesFromDb(mode, limit = 20, range, sport = 'football') {
   const db = getDb();
   const currentSport = sport ?? 'football';
+
+  const selectColumns = `match_id, sport, date, status, home_team_id, away_team_id, home_team, away_team, home_goals, away_goals, league_id, league_name, league_country, season, round`;
 
   if (mode === 'live') {
     const statuses = LIVE_STATUS_CODES[currentSport] ?? LIVE_STATUS_CODES.football;
     const placeholders = statuses.map((_, index) => `@status${index}`).join(', ');
     const stmt = db.prepare(`
-      SELECT match_id, sport, date, status, home_team_id, away_team_id, home_team, away_team, home_goals, away_goals
+      SELECT ${selectColumns}
       FROM matches
       WHERE sport = @sport
         AND status IN (${placeholders})
@@ -109,7 +125,7 @@ export function loadMatchesFromDb(mode, limit = 20, range, sport = 'football') {
 
   if (range === 'today') {
     const stmt = db.prepare(`
-      SELECT match_id, sport, date, status, home_team_id, away_team_id, home_team, away_team, home_goals, away_goals
+      SELECT ${selectColumns}
       FROM matches
       WHERE sport = @sport
         AND date IS NOT NULL
@@ -121,7 +137,7 @@ export function loadMatchesFromDb(mode, limit = 20, range, sport = 'football') {
   }
 
   const stmt = db.prepare(`
-    SELECT match_id, sport, date, status, home_team_id, away_team_id, home_team, away_team, home_goals, away_goals
+    SELECT ${selectColumns}
     FROM matches
     WHERE sport = @sport
       AND (
@@ -419,20 +435,35 @@ async function requestBasketballGames(params, apiKey, label) {
 }
 
 async function requestApi(url, { headers, label }) {
-  const response = await axios.get(url, {
-    headers,
-    timeout: DEFAULT_TIMEOUT_MS,
-    validateStatus: (status) => status >= 200 && status < 500
-  });
-
-  if (response.status !== 200) {
-    throw new Error(`${label}: HTTP ${response.status} ${response.statusText ?? ''}`.trim());
+  let response;
+  try {
+    response = await axios.get(url, {
+      headers,
+      timeout: DEFAULT_TIMEOUT_MS,
+      validateStatus: (status) => status >= 200 && status < 500
+    });
+  } catch (error) {
+    recordApiFetch({ label, ok: false, url, error: error?.message ?? String(error) });
+    throw error;
   }
 
   const payload = response.data ?? {};
-  const apiError = getApiErrorMessage(payload.errors);
-  if (apiError) throw new Error(`${label}: API-Fehler: ${apiError}`);
+  const responseCount = Array.isArray(payload.response) ? payload.response.length : 0;
 
+  if (response.status !== 200) {
+    const message = `${label}: HTTP ${response.status} ${response.statusText ?? ''}`.trim();
+    recordApiFetch({ label, ok: false, status: response.status, responseCount, url, error: message });
+    throw new Error(message);
+  }
+
+  const apiError = getApiErrorMessage(payload.errors);
+  if (apiError) {
+    const message = `${label}: API-Fehler: ${apiError}`;
+    recordApiFetch({ label, ok: false, status: response.status, responseCount, url, error: message });
+    throw new Error(message);
+  }
+
+  recordApiFetch({ label, ok: true, status: response.status, responseCount, url });
   return payload;
 }
 
@@ -453,9 +484,21 @@ function saveMatches(matches, sport) {
   const db = getDb();
   const insert = db.prepare(`
     INSERT OR REPLACE INTO matches
-      (match_id, sport, date, status, home_team_id, away_team_id, home_team, away_team, home_goals, away_goals)
+      (
+        match_id, sport, date, status,
+        home_team_id, away_team_id, home_team, away_team,
+        home_goals, away_goals,
+        league_id, league_name, league_country, season, round,
+        raw_json
+      )
     VALUES
-      (@match_id, @sport, @date, @status, @home_team_id, @away_team_id, @home_team, @away_team, @home_goals, @away_goals)
+      (
+        @match_id, @sport, @date, @status,
+        @home_team_id, @away_team_id, @home_team, @away_team,
+        @home_goals, @away_goals,
+        @league_id, @league_name, @league_country, @season, @round,
+        @raw_json
+      )
   `);
 
   const mapRow = sport === 'basketball' ? mapBasketballMatch : mapFootballMatch;
@@ -473,6 +516,7 @@ function mapFootballMatch(match) {
   const fixture = match?.fixture ?? {};
   const teams = match?.teams ?? {};
   const goals = match?.goals ?? {};
+  const league = match?.league ?? {};
   const homeTeam = teams.home ?? {};
   const awayTeam = teams.away ?? {};
   const status = fixture.status ?? {};
@@ -483,12 +527,18 @@ function mapFootballMatch(match) {
     match_id: matchId,
     date: isoDate,
     status: status.short ?? status.long ?? match?.status ?? null,
-    home_team_id: homeTeam.id ?? null,
-    away_team_id: awayTeam.id ?? null,
+    home_team_id: homeTeam.id ?? match?.home_team_id ?? null,
+    away_team_id: awayTeam.id ?? match?.away_team_id ?? null,
     home_team: homeTeam.name ?? match?.home_team ?? null,
     away_team: awayTeam.name ?? match?.away_team ?? null,
     home_goals: isNumber(goals.home) ? goals.home : null,
-    away_goals: isNumber(goals.away) ? goals.away : null
+    away_goals: isNumber(goals.away) ? goals.away : null,
+    league_id: league.id ?? match?.league_id ?? null,
+    league_name: league.name ?? match?.league_name ?? null,
+    league_country: league.country ?? match?.league_country ?? null,
+    season: league.season ?? match?.season ?? null,
+    round: league.round ?? match?.round ?? null,
+    raw_json: safeJsonStringify(match)
   };
 }
 
@@ -508,6 +558,7 @@ function mapFootballTeamSearchResult(entry) {
 
 function mapBasketballMatch(match) {
   const teams = match?.teams ?? {};
+  const league = match?.league ?? {};
   const homeTeam = teams.home ?? {};
   const awayTeam = teams.away ?? {};
   const rawStatus = match?.status ?? {};
@@ -522,12 +573,18 @@ function mapBasketballMatch(match) {
     match_id: matchId,
     date: isoDate,
     status: status.short ?? status.long ?? null,
-    home_team_id: homeTeam.id ?? null,
-    away_team_id: awayTeam.id ?? null,
+    home_team_id: homeTeam.id ?? match?.home_team_id ?? null,
+    away_team_id: awayTeam.id ?? match?.away_team_id ?? null,
     home_team: homeTeam.name ?? match?.home_team ?? null,
     away_team: awayTeam.name ?? match?.away_team ?? null,
     home_goals: isNumber(homeScore) ? homeScore : null,
-    away_goals: isNumber(awayScore) ? awayScore : null
+    away_goals: isNumber(awayScore) ? awayScore : null,
+    league_id: league.id ?? match?.league_id ?? null,
+    league_name: league.name ?? match?.league_name ?? null,
+    league_country: league.country ?? match?.league_country ?? null,
+    season: league.season ?? match?.season ?? null,
+    round: league.round ?? match?.round ?? null,
+    raw_json: safeJsonStringify(match)
   };
 }
 
@@ -636,4 +693,44 @@ function parseTime(iso) {
 
 function isNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
+}
+
+function recordApiFetch({ label, ok, status = null, responseCount = 0, error = null, url = null, params = null }) {
+  try {
+    const db = getDb();
+    db.prepare(`
+      INSERT INTO api_fetch_log (label, ok, status, response_count, error, url, params)
+      VALUES (@label, @ok, @status, @responseCount, @error, @url, @params)
+    `).run({
+      label: label ?? 'unknown',
+      ok: ok ? 1 : 0,
+      status,
+      responseCount: Number(responseCount) || 0,
+      error,
+      url: sanitizeUrl(url),
+      params
+    });
+  } catch {
+    // Diagnostics must never break the actual bot flow. Sadly, logging can also fail, because software.
+  }
+}
+
+function sanitizeUrl(url) {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    parsed.searchParams.delete('key');
+    parsed.searchParams.delete('api_key');
+    return parsed.toString();
+  } catch {
+    return String(url).slice(0, 500);
+  }
 }
