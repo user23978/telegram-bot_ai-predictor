@@ -8,6 +8,7 @@ dotenv.config();
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST ?? 'http://localhost:11434';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'gemma3:27b';
+const OLLAMA_REQUIRED = String(process.env.OLLAMA_REQUIRED ?? 'false').toLowerCase() === 'true';
 const TEAM_HISTORY_SIZE = Number(process.env.TEAM_HISTORY_SIZE) || 24;
 const H2H_HISTORY_SIZE = Number(process.env.H2H_HISTORY_SIZE) || 10;
 
@@ -21,13 +22,15 @@ export async function predictTeamMatchup(homeTeam, awayTeam) {
   await fetchFootballHeadToHeadHistoryV2(home.id, away.id, H2H_HISTORY_SIZE, {});
 
   const context = getManualContext(home, away);
-  const features = buildManualFeatures(context);
+  const features = buildManualFeatures(context, home.id, away.id);
   const diagnostics = buildDiagnostics(context, features);
-  const prepared = { home, away, context, features, diagnostics };
+  const prepared = { home, away, context, features, diagnostics, aiError: null };
 
   if (OLLAMA_MODEL) {
     const ai = await tryOllama(prepared);
-    if (ai) return withMeta(ai, `ollama:${OLLAMA_MODEL}`, prepared);
+    if (ai.result) return withMeta(ai.result, `ollama:${OLLAMA_MODEL}`, prepared);
+    prepared.aiError = ai.error;
+    if (OLLAMA_REQUIRED) return { error: `Ollama/Gemma fehlgeschlagen: ${ai.error}` };
   }
 
   return withMeta(rulePredict(prepared), 'rule-based-manual', prepared);
@@ -71,9 +74,11 @@ function h2h(db, homeId, awayId, limit) {
   `).all({ homeId, awayId, limit });
 }
 
-function buildManualFeatures(context) {
-  const home = summarize(context.homeTeamRecent, context.homeTeamId);
-  const away = summarize(context.awayTeamRecent, context.awayTeamId);
+function buildManualFeatures(context, homeId, awayId) {
+  context.homeTeamId = homeId;
+  context.awayTeamId = awayId;
+  const home = summarize(context.homeTeamRecent, homeId);
+  const away = summarize(context.awayTeamRecent, awayId);
   return {
     home_games: home.games,
     away_games: away.games,
@@ -98,10 +103,9 @@ function buildManualFeatures(context) {
   };
 }
 
-function summarize(rows, fallbackTeamId) {
+function summarize(rows, teamId) {
   const summary = { games: 0, wins: 0, draws: 0, losses: 0, gf: 0, ga: 0, points: 0, weighted: 0, maxWeighted: 0, markers: [] };
   rows.forEach((row, index) => {
-    const teamId = fallbackTeamId ?? (row.home_team_id || row.away_team_id);
     const isHome = Number(row.home_team_id) === Number(teamId);
     const gf = Number(isHome ? row.home_goals : row.away_goals);
     const ga = Number(isHome ? row.away_goals : row.home_goals);
@@ -153,29 +157,60 @@ function buildDiagnostics(context, features) {
 }
 
 async function tryOllama(prepared) {
+  const prompt = buildPrompt(prepared);
+  const host = OLLAMA_HOST.replace(/\/$/, '');
+
   try {
-    const prompt = buildPrompt(prepared);
-    const host = OLLAMA_HOST.replace(/\/$/, '');
+    const response = await axios.post(`${host}/api/chat`, {
+      model: OLLAMA_MODEL,
+      stream: false,
+      format: 'json',
+      messages: [
+        {
+          role: 'system',
+          content: 'Du bist ein Fussball-Analysemodell. Antworte ausschliesslich mit gueltigem JSON. Kein Markdown, kein Fliesstext, keine Erklaerung ausserhalb des JSON.'
+        },
+        { role: 'user', content: prompt }
+      ],
+      options: ollamaOptions()
+    }, { timeout: Number(process.env.OLLAMA_TIMEOUT_MS) || 90000 });
+
+    const parsed = parsePayload(response.data);
+    const normalized = normalizePrediction(parsed, prepared);
+    if (normalized) return { result: normalized, error: null };
+    return { result: null, error: `Ollama chat returned invalid JSON: ${preview(response.data)}` };
+  } catch (chatError) {
+    console.warn('manual-matchup ollama chat failed:', chatError?.message ?? chatError);
+  }
+
+  try {
     const response = await axios.post(`${host}/api/generate`, {
       model: OLLAMA_MODEL,
       prompt,
       stream: false,
       format: 'json',
-      options: {
-        temperature: 0.05,
-        top_p: 0.75,
-        repeat_penalty: 1.08,
-        num_ctx: Number(process.env.OLLAMA_NUM_CTX) || 8192,
-        num_predict: Number(process.env.OLLAMA_NUM_PREDICT) || 900
-      }
+      options: ollamaOptions()
     }, { timeout: Number(process.env.OLLAMA_TIMEOUT_MS) || 90000 });
 
     const parsed = parsePayload(response.data);
-    return normalizePrediction(parsed, prepared);
-  } catch (error) {
-    console.warn('manual-matchup ollama failed:', error?.message ?? error);
-    return null;
+    const normalized = normalizePrediction(parsed, prepared);
+    if (normalized) return { result: normalized, error: null };
+    return { result: null, error: `Ollama generate returned invalid JSON: ${preview(response.data)}` };
+  } catch (generateError) {
+    const message = generateError?.response?.data?.error ?? generateError?.message ?? String(generateError);
+    console.warn('manual-matchup ollama generate failed:', message);
+    return { result: null, error: message };
   }
+}
+
+function ollamaOptions() {
+  return {
+    temperature: 0.03,
+    top_p: 0.7,
+    repeat_penalty: 1.08,
+    num_ctx: Number(process.env.OLLAMA_NUM_CTX) || 8192,
+    num_predict: Number(process.env.OLLAMA_NUM_PREDICT) || 900
+  };
 }
 
 function buildPrompt(prepared) {
@@ -191,11 +226,11 @@ function buildPrompt(prepared) {
   };
 
   return [
-    'Du bist ein vorsichtiger Fussball-Analyst. Dieses Match ist virtuell/manuell, weil keine kommende Fixture verfuegbar ist.',
+    'Dieses Match ist virtuell/manuell, weil keine kommende Fixture verfuegbar ist.',
     'Nutze nur die historischen Daten. Behaupte keine aktuellen Verletzungen, Quoten oder Aufstellungen.',
     'Wenn Samples schwach sind, confidence niedrig halten und keine starke Wette empfehlen.',
-    'Antwort nur als JSON: match_id, prediction, probabilities {home, draw, away}, explanation, betting_advice {recommendation, confidence, reasoning}.',
-    'match_id soll "manual-matchup" sein.',
+    'Gib NUR valides JSON mit exakt diesen Feldern aus:',
+    '{"match_id":"manual-matchup","prediction":"Heimsieg|Unentschieden|Auswaertssieg","probabilities":{"home":0.0,"draw":0.0,"away":0.0},"explanation":"...","betting_advice":{"recommendation":"...","confidence":0.0,"reasoning":"..."}}',
     'RAW_DATA_JSON:',
     JSON.stringify(raw, null, 2)
   ].join('\n');
@@ -247,7 +282,11 @@ function withMeta(result, engine, prepared) {
   return {
     ...result,
     engine,
-    data_quality: { diagnostics: prepared.diagnostics, manual_matchup: true },
+    data_quality: {
+      diagnostics: prepared.diagnostics,
+      manual_matchup: true,
+      ai_error: prepared.aiError ?? null
+    },
     manual_matchup: { home: prepared.home, away: prepared.away }
   };
 }
@@ -261,6 +300,7 @@ function parsePayload(raw) {
   if (!raw) return null;
   if (typeof raw === 'string') return extractJson(raw);
   if (raw.prediction && raw.probabilities) return raw;
+  if (typeof raw.message?.content === 'string') return extractJson(raw.message.content);
   for (const key of ['response', 'completion', 'output', 'text']) {
     if (typeof raw[key] === 'string') {
       const parsed = extractJson(raw[key]);
@@ -270,7 +310,16 @@ function parsePayload(raw) {
   return null;
 }
 
-function extractJson(text) { const m = String(text ?? '').match(/\{[\s\S]*\}/); if (!m) return null; try { return JSON.parse(m[0]); } catch { return null; } }
+function preview(value) {
+  try { return JSON.stringify(value).slice(0, 500); } catch { return String(value).slice(0, 500); }
+}
+
+function extractJson(text) {
+  const cleaned = String(text ?? '').replace(/```json/gi, '```').replace(/```/g, '').trim();
+  const m = cleaned.match(/\{[\s\S]*\}/);
+  if (!m) return null;
+  try { return JSON.parse(m[0]); } catch { return null; }
+}
 function prob(v) { const n = Number(String(v ?? '').replace('%', '').trim()); return Number.isFinite(n) ? (n > 1 ? n / 100 : n) : null; }
 function normalizeProbabilities(p) { const h = Math.max(0, prob(p.home) ?? 0); const d = Math.max(0, prob(p.draw) ?? 0); const a = Math.max(0, prob(p.away) ?? 0); const t = h + d + a; return t ? { home: round(h / t), draw: round(d / t), away: round(a / t) } : { home: 0.34, draw: 0.33, away: 0.33 }; }
 function pick(p) { return [['Heimsieg', p.home], ['Unentschieden', p.draw], ['Auswaertssieg', p.away]].sort((a, b) => b[1] - a[1])[0][0]; }
