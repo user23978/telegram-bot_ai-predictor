@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 
 import { getDb } from '../data/db.js';
 import {
-  searchTeams,
+  searchTeams as searchTeamsApi,
   loadMatchesFromDb as loadMatchesFromDbOriginal
 } from './apiHandler.js';
 
@@ -14,7 +14,12 @@ const DEFAULT_TIMEZONE = process.env.API_TIMEZONE ?? 'Europe/Berlin';
 const DEFAULT_TIMEOUT_MS = Number(process.env.API_TIMEOUT_MS) || 15000;
 const DEFAULT_WINDOW = process.env.API_FOOTBALL_ALLOWED_DATE_WINDOW ?? '-1,0,1';
 
-export { searchTeams };
+export async function searchTeams(query, options = {}) {
+  const limit = Number(options.limit) || 8;
+  const apiTeams = await searchTeamsApi(query, options).catch(() => []);
+  const dbTeams = searchTeamsFromDb(query, limit * 2);
+  return mergeTeams(apiTeams, dbTeams).slice(0, limit);
+}
 
 export async function fetchMatches(options = {}) {
   const { sport = 'football', mode = 'live', limit = 20, range } = options;
@@ -76,6 +81,51 @@ async function fetchFootballAllowedWindow({ limit = 20, range, teamId = null }) 
   const result = [...collected.values()].sort((a, b) => parseTime(getDate(a)) - parseTime(getDate(b))).slice(0, limit);
   if (result.length) saveFootballMatches(result);
   return result;
+}
+
+function searchTeamsFromDb(query, limit) {
+  const normalized = String(query ?? '').trim().toLowerCase();
+  if (!normalized) return [];
+
+  try {
+    const db = getDb();
+    const rows = db.prepare(`
+      SELECT home_team_id AS id, home_team AS name, league_country AS country, league_name AS venue, COUNT(*) AS games
+      FROM matches
+      WHERE home_team_id IS NOT NULL AND home_team IS NOT NULL AND LOWER(home_team) LIKE @query
+      GROUP BY home_team_id, home_team
+      UNION ALL
+      SELECT away_team_id AS id, away_team AS name, league_country AS country, league_name AS venue, COUNT(*) AS games
+      FROM matches
+      WHERE away_team_id IS NOT NULL AND away_team IS NOT NULL AND LOWER(away_team) LIKE @query
+      GROUP BY away_team_id, away_team
+      ORDER BY games DESC
+      LIMIT @limit
+    `).all({ query: `%${normalized}%`, limit });
+
+    return rows.map((row) => ({
+      id: Number(row.id),
+      name: row.name,
+      country: row.country ?? null,
+      venue: row.venue ? `aus DB: ${row.venue}` : 'aus alten Matches',
+      sport: 'football',
+      source: 'local-db'
+    })).filter((team) => team.id && team.name);
+  } catch {
+    return [];
+  }
+}
+
+function mergeTeams(...groups) {
+  const map = new Map();
+  for (const group of groups) {
+    for (const team of group ?? []) {
+      const id = Number(team.id);
+      if (!Number.isFinite(id) || !team.name) continue;
+      if (!map.has(id)) map.set(id, team);
+    }
+  }
+  return [...map.values()];
 }
 
 function buildDateWindows(range) {
