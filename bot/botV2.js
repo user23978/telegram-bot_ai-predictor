@@ -6,7 +6,7 @@ import {
   fetchUpcomingMatchesForTeam,
   loadMatchesFromDb,
   searchTeams
-} from '../api/apiHandler.js';
+} from '../api/matchBrowserV2.js';
 import { getPredictionDebug, predictMatch } from '../ai/predictorV3.js';
 import { getDb } from '../data/db.js';
 import { setupDatabase } from '../data/dbSetup.js';
