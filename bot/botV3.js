@@ -3,7 +3,7 @@ import { Telegraf, Markup } from 'telegraf';
 
 import { fetchMatches, fetchUpcomingMatchesForTeam, loadMatchesFromDb, searchTeams } from '../api/matchBrowserV3.js';
 import { getPredictionDebug, predictMatch } from '../ai/predictorV3.js';
-import { predictTeamMatchup } from '../ai/matchupPredictor.js';
+import { predictTeamMatchup } from '../ai/matchupPredictorSafe.js';
 import { getDb } from '../data/db.js';
 import { setupDatabase } from '../data/dbSetup.js';
 
